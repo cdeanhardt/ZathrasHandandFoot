@@ -1,0 +1,4882 @@
+-- Constants------------------------------------------------------------------------
+-- there's no law against these changing during a run but they're not supposed to
+gi_NUM_COLUMNS=5            -- number of columns in the UI
+gi_NUM_ROWS=4               -- number of rows in the UI
+gb_USE_TURNS=true           -- admin boolean for whether to used the turn based system or not
+gv_CARD_SIZE = {["x"]=3, ["y"]=1, ["z"]=2} -- Default size of the cards
+gt_DECODE_DIR = { [0]={"x",-1}, [90]={"z",-1}, [180]={"x",1}, [270]={"z",1} } -- table used to help decode directions based on rotation (0, 90,180,270)
+
+gt_PANEL_VERTICAL_OFFSET_BY_ROWNUM = {[1]=-43,[2]= -73,[3]= -103,[4]= -133}  -- offset to set the 1st icon at, based on the rownumber
+gt_ALIGN_WORDS = {[-3] = "off", [-1]="off", [1]="high", [3]="low"}           -- pretty word to use for how alignment is done, based on special math (see its use)
+gt_PLAYER_COLOR_BY_NUM={[1]="White",[2]="Green",[3]="Blue",[4]="Red"}        -- The general order of players on the board, must sync with playerStuff[-].num
+gi_RED_BOOK_SCORE = 500
+gi_BLACK_BOOK_SCORE = 300
+gi_WILD_BOOK_SCORE = 1500
+
+-- Globals -------------------------------------------------------------------------
+-- Values that are set globally and expected to change over time
+gbPlaySounds=false          -- admin boolean to play sounccube sounds or not (generally not when using turns)
+giDiscardSound = 9          -- if playing sounds, use this one for a discard
+gbShowDirButtons=false      -- whether to display the x/z buttons useful for debugging orientation
+gbDevGhostBoxes=true       -- show ghost boxes from .Cast calls
+giCurNumPlayersOnFelt = -1  -- records the number of players in the current surface, to avoid repaints
+--PanelHeightBeforeClose=0    -- before someone closes the UI panel, save the height for resetting it
+                            -- arguably, this should be by-player but the size of the panel should be
+                            -- the same for each of them so there's little harm
+giHand=0                    -- Current hand number (zero before first deal)
+gfDealDelayMult = .2        -- multiplier for the amount of time to delay each individual deal of a card by (makes it prettier)
+gsGoesFirstColor = ""       -- Color of the player who is to go first in current hand
+gsFirstToGoFirstColor = ""  -- Color of the player who goes first in the first hand of the game
+gfSpreadMult = .8           -- How much gap to put between cards when laying out in a row
+gsSortedPlayerScoresheetIndex={}  -- Array indicating which row of the scoresheet an individual color is
+                                  -- This is needed b/c sometimes it's just White/Green, skips blue (2 player), etc..
+gtScores = {[1]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0},  -- Table of scores for the scoreboard
+          [2]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0},
+          [3]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0},
+          [4]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0}}
+giNewgameCountdown = 6      -- The number of seconds remaining in the countdown for doing a new deal
+gfDropShift = .5
+
+
+-- ==================================================
+-- Variables used for debugging
+-- ==================================================
+gtDebugFlags={
+--          ["dropped"]=1,
+--["spread"]=1,
+layoutsel=1,
+--["getowner"]=1,
+--["getallscorezones"]=1,
+--          ["weird"]=1,
+--          ["buttons"]=1,
+}
+
+
+-- Peoplez be liking all sorts of different ways of sorting
+refCardOrder = {"Ace", "2", "3", "4", "5", "6", "7", "8", "9", "10", "Jack", "Queen", "King", "Joker", } -- The original, not really used
+refCardOrderLAceL = {"Ace", "2", "3", "4", "5", "6", "7", "8", "9", "10", "Jack", "Queen", "King", "Joker", } -- Low2High is Left2Right, Ace is Low
+refCardOrderRAceL = {"Joker", "King", "Queen", "Jack", "10", "9", "8", "7", "6", "5", "4", "3", "2", "Ace" }  -- Low2High is Right2Left, Ace is Low
+refCardOrderLAceH = { "2", "3", "4", "5", "6", "7", "8", "9", "10", "Jack", "Queen", "King","Ace", "Joker", } -- Low2High is Left2Right, Ace is High
+refCardOrderRAceH = {"Joker", "Ace", "King", "Queen", "Jack", "10", "9", "8", "7", "6", "5", "4", "3", "2", } -- Low2High is Right2Left, Ace is High
+refSuitOrder = {"Clubs", "Spades", "Hearts", "Diamonds", "BW", "Color", }  -- The original code had suit sorting, I left it for future stealing but we don't care about suits
+refCardOrderIndex={}  -- Reverse Index of one of the refCardOrders
+                      -- Used as a high performance method (i.e. no iteration) to find the index of a given value, such as:
+                      -- return refCardOrderIndex["Seven"]
+                      -- the index returned depends on which of the tables, above, are used to set the value
+                      -- of this table, just before it is used.
+
+
+-- -----------------------------------------------------------------------------
+-- initial code for setting up basic Values
+-- Kinda weird to have code outside of a function, but it runs when the code Loads
+-- and not again
+-- -----------------------------------------------------------------------------
+-- Reverse Index of refSuitOrder
+-- Used as a high performance method (i.e. no iteration) to find the index of a given value, such as:
+-- return refSuitOrderIndex["Diamond"]
+local refSuitOrderIndex={}
+for k,v in pairs(refSuitOrder) do
+  refSuitOrderIndex[v]=k
+end
+
+
+
+
+-- =============================================================================
+function admin_deckem()
+  -- This is a dev utility, it will split the deck into multiple rows,
+  -- one per standard deck, with 13 piles of each unique card value
+  local aPulled={[1]={}}
+  -- SubFunction
+  function admin_deckemOneCardPos(oneCard)
+    local _, sName, sSuit  = cardDeets(oneCard)
+    iPull=1
+    while (aPulled[iPull] and aPulled[iPull][oneCard.description]) do
+      iPull=iPull+1
+    end
+    if (not aPulled[iPull]) then
+      aPulled[iPull]={}
+    end
+    aPulled[iPull][oneCard.description]=1
+    local iOrd = refCardOrderIndex[sName]
+    local tParam = {position={x=30-iOrd*2.5, y=3, z=-25+(iPull-1)*3.5}, flip=true, rotation={0,0,0}, guid=oneCard.guid, smooth=false}
+    return tParam
+  end
+
+  admin_sinkWalls()
+  mainDeck = initializeHand()
+  if (mainDeck) then
+    mainDeck.setPosition({-30, 3, 30})
+    setSortOrder(true,true)
+    local tDeckCards = mainDeck.getObjects()
+    for i, oneCard in ipairs(tDeckCards) do
+      local tParam = admin_deckemOneCardPos(oneCard)
+      if (mainDeck.getQuantity()==0) then
+        oneCard = mainDeck.remainder
+        oneCard.flip()
+        oneCard.setPosition(tParam.position)
+      else
+        mainDeck.takeObject(tParam)
+      end
+    end
+  else
+    log ("Error: no MainDeck?!?")
+  end
+  log("x")
+end
+
+
+
+-- =============================================================================
+function recordScores()
+  -- execute a tally of scores and update the current hand on the scoresheet
+  debug("recording scores","panel")
+  debug(dump(gtScores),"panel")
+
+    bRunScoring= true
+    setButtons()
+    local fourScores = countScoreInternal()
+    countScore()
+
+    for sColor, iScore in pairs(fourScores) do
+      local i = playerStuff[sColor].num
+      debug("scolor=".. sColor,"panel")
+      debug("playernum="..i,"panel")
+      debug("score="..iScore,"panel")
+      debug("giHand="..giHand,"panel")
+      UI.setAttribute("P".. playerStuff[sColor].num .. "R" .. giHand .. "Score","text",iScore)
+      gtScores[i][giHand]=iScore
+      debug("S[1][1]=" ..gtScores[i][giHand],"panel")
+      debug(dump(gtScores),"panel")
+    end
+    refreshScoresheet()
+    debug(dump(gtScores),"panel")
+
+end
+
+-- =============================================================================
+function round(fNum, iDec)
+  -- There wasn't a round function that let you round to a decimal
+  -- technically, it's not a rounding, it always "rounds up" but it's
+  -- good enough
+  -- fNum - number to be rounded
+  -- iDec - number of decimal places to which to round
+  if (not iDec) then
+    return math.ceil(fNum)
+  end
+  return math.ceil(fNum * 10^iDec) / 10^iDec
+end
+
+-- =============================================================================
+function dump(o)
+    -- convenience for debugging.
+    -- takes a thing (object, table, number..) and returns a string that
+    -- represents it the best
+    -- o - object to be dumped
+    if type(o) == 'table' then
+        if (o.x and o.y and o.z) then
+          return "(x,y,z) = (".. round(o.x,1) .. "," .. round(o.y,1) .. "," .. round(o.z,1) .. ")"
+        else
+          local s = '{ '
+          for k,v in pairs(o) do
+                  if type(k) ~= 'number' then k = '"'..k..'"' end
+                  s = s .. '['..k..'] = ' .. dump(v) .. ','
+          end
+          return s .. '} '
+      end
+    else
+        if (tonumber(o)) then
+          o = round(tonumber(o),2)
+        end
+        return tostring(o)
+    end
+end
+----
+-- =============================================================================
+function setPanelVisibility()
+  -- set the UI panel to be visible to some players while not to others
+  -- based on their current preference in playerStuff
+  local sVisible="Yellow"  -- the visibility attribute seemed to need SOMETHING as being empty = everyone, so use "yellow" since its not a player
+  for _, player in ipairs(Player.getPlayers()) do
+    if (playerStuff[player.color].bScoreVisible) then
+      sVisible = sVisible .. iif(sVisible=="","","|") .. player.color
+      debug("visible = " .. sVisible,"panel")
+    end
+  end
+  debug("visibility...","panel")
+  debug(UI.getAttribute("ScoreSheetPanel","visibility"),"panel" )
+  --UI.setAttribute("ScoreSheetPanel","visibility",sVisible)
+  UI.setAttribute("SubPanel","visibility",sVisible)
+  UI.setAttribute("ScoreTable","visibility",sVisible)
+end
+
+-- =============================================================================
+function ClosePanel(oPlayer)
+    -- called when a player chooses to close the panel.
+    -- oPlayer - the player instance who is closing their panel
+    playerStuff[oPlayer.color].bScoreVisible = not playerStuff[oPlayer.color].bScoreVisible
+    setPanelVisibility()
+end
+
+
+
+-- =============================================================================
+function setSortOrder(bLeft, bAceHigh)
+  -- We're about to sort some cards, so based on preferences, set up the
+  -- refcardorderindex for use in the sort
+  -- bLeft    - Low to high is Left to Right (otherwise Right to Left)
+  -- bAceHigh - Ace his higher than the king (otherwise lower than two)
+  if bAceHigh then
+    if (bLeft) then
+      for k,v in pairs(refCardOrderLAceH) do
+        refCardOrderIndex[v]=k
+      end
+    else
+      for k,v in pairs(refCardOrderRAceH) do
+        refCardOrderIndex[v]=k
+      end
+    end
+  else
+    if (bLeft) then
+      for k,v in pairs(refCardOrderLAceL) do
+        refCardOrderIndex[v]=k
+      end
+    else
+      for k,v in pairs(refCardOrderRAceL) do
+        refCardOrderIndex[v]=k
+      end
+    end
+  end
+end
+
+
+-- =============================================================================
+function totalScores()
+  -- Calculate the total scores from the gtScores table and place them
+  -- into the total column of the same table (display on screen will be elsewhere)
+  for k, v in pairs(gtScores) do
+    local tot = 0
+    for i, s in pairs(v) do
+      if (tonumber(s)) then
+        if (i<5) then
+          tot=tot+tonumber(s)
+        end
+      end
+    end
+    gtScores[k][5]=tot
+  end
+end
+
+
+-- =============================================================================
+function refreshScoresheet()
+  -- update the scoresheet UI Panel
+  -- this goes well beyond just updating the scores.  This sets the number of players,
+  -- resizes the panel, sets the "1st" icon, etc
+
+  debug("Refreshing Scoresheet","panel")
+  totalScores()
+
+  local iSeatedPlayersBeforeGoesFirst = 0
+  local bHitGoesFirst = false
+  UI.setAttribute("WindowTitle","text","Score Sheet - Hand " .. giHand)
+  for player = 1, gi_NUM_ROWS do
+    if (Player[gt_PLAYER_COLOR_BY_NUM[player]].seated) then
+      if ((not bHitGoesFirst) and (gsGoesFirstColor != gt_PLAYER_COLOR_BY_NUM[player])) then
+        iSeatedPlayersBeforeGoesFirst = iSeatedPlayersBeforeGoesFirst + 1
+      end
+      if (gsGoesFirstColor == gt_PLAYER_COLOR_BY_NUM[player]) then
+        bHitGoesFirst = true
+      end
+      for hand = 1, gi_NUM_COLUMNS do
+        local scoreId = "P".. player .."R".. hand .. "Score"
+        debug("updating " .. scoreId,"panel")
+        if (gtScores[player] and gtScores[player][hand]) then
+          debug("with " .. gtScores[player][hand],"panel")
+          UI.setAttribute(scoreId, "text",iif(gtScores[player][hand]==0,"",gtScores[player][hand]))
+        else
+          UI.setAttribute(scoreId, "text","")
+        end
+      end
+      UI.setAttribute("ScoreRow"..player,"active","true")
+      debug("setting ScoreRow"..player..".active = true","seated")
+    else
+      UI.setAttribute("ScoreRow"..player,"active","false")
+      debug("setting ScoreRow"..player..".active = false","seated")
+    end
+  end
+
+  local pos = 0
+  if (gt_PANEL_VERTICAL_OFFSET_BY_ROWNUM[iSeatedPlayersBeforeGoesFirst+1]) then
+     pos = gt_PANEL_VERTICAL_OFFSET_BY_ROWNUM[iSeatedPlayersBeforeGoesFirst+1]
+     UI.setAttribute("GoesFirst","offsetXY","2 " .. pos)
+     UI.setAttribute("GoesFirst","active","true")
+  end
+
+  setPlayerNamesOnScoresheet()
+
+end
+
+-- =============================================================================
+function setPlayerNamesOnScoresheet()
+  -- Set up the panel with the right players and their names/nicks
+  UI.setAttribute("ScoreRow1","active","false")
+  UI.setAttribute("ScoreRow2","active","false")
+  UI.setAttribute("ScoreRow3","active","false")
+  UI.setAttribute("ScoreRow4","active","false")
+  debug("setting ScoreRow1"..".active = false","seated")
+  debug("setting ScoreRow2"..".active = false","seated")
+  debug("setting ScoreRow3"..".active = false","seated")
+  debug("setting ScoreRow4"..".active = false","seated")
+  playerList = getSortedSeatedPlayers()
+  debug("sortedseated players = ...","seated")
+  debug(playerList,"seated")
+  gsSortedPlayerScoresheetIndex={}
+  for iP, playerColor in ipairs(playerList) do
+    local num = playerStuff[playerColor].num
+    local nick = playerStuff[playerColor].nick
+    if (not nick or nick=="") then
+      nick = Player[playerColor].steam_name
+    end
+    UI.setAttribute("Player"..num,"text",nick)
+    UI.setAttribute("ScoreRow"..num,"active","true")
+    gsSortedPlayerScoresheetIndex[playerColor] = iP
+    debug("setting ScoreRow"..num..".active = true","seated")
+  end
+  UI.setAttribute("ScoreTable","height",(1+#playerList)*30)
+  UI.setAttribute("SubPanel","height",(1+#playerList)*30+20)
+end
+
+-- =============================================================================
+function onPlayerChangeColor( player_color)
+  -- This is a TTS Event, called when someone changes colors (sits, stands, etc..)
+  -- we want to change the score panel.  If they change to grey, let's do Nothing
+  -- they are probably just resetting their own interface and rejiggering the
+  -- panel can screw things up
+  if (player_color != 'Grey') then
+    setPlayers()
+    setPlayerNamesOnScoresheet()
+  end
+end
+
+-- =============================================================================
+function debug(str, grp)
+  -- for debugging, this does a "log" but only if the grp passed in is in the
+  -- gtDebugFlags table.  This lets you leave debug statements in the code all
+  -- over the place but not be overloading the output with noise you don't need
+  -- at the moment
+  -- str - Message to be displayed
+  -- grp - the name of the debug flag to look for
+  if grp then
+    if (gtDebugFlags[grp]) then
+      --writeToNotebookTab(str)
+      log(str)
+    end
+  else
+    -- log(str)
+  end
+end
+
+-- =============================================================================
+function click_DoNothing(_, color)
+-- a null function as one is required for buttons but not always needed
+end
+
+
+-- =============================================================================
+function click_ToggleScoring(_, color)
+  -- Toggle scoring on/off and explicitly kick one off if it's on
+  -- clear the display variables if it isn't
+  bRunScoring = not bRunScoring
+  setButtons()
+  if (bRunScoring) then
+    countScore()
+  else
+    text_score_white.TextTool.setValue(" ")
+    text_score_blue.TextTool.setValue(" ")
+    text_score_green.TextTool.setValue(" ")
+    text_score_red.TextTool.setValue(" ")
+  end
+end
+
+
+-- =============================================================================
+function click_ToggleRules(_, color)
+  -- on button press, change which rule set we're using
+  giRuleSet = (giRuleSet+1) % giNumRuleSets
+  if (giRuleSet == giCaliforniaRules) then
+    announceAll("California Rules In Effect")
+  else
+    announceAll("North Carolina Rules In Effect")
+  end
+  setButtons()
+  Wait.time(function() setButtons() end, 1.0)
+end
+
+
+-- =============================================================================
+function click_NewGame(_, color)
+  -- on button press, start a countdown to press this button again
+  -- to deal a new game (technically, it's a different button but seems to be
+  -- the same one to the user)
+  giNewgameCountdown=6
+  setButtons()
+  Wait.time(function() setButtons() end, 1.0)
+end
+
+-- =============================================================================
+function click_NewGameSure(_, color)
+  -- user clicked the newgame button while it was still within the countdown
+  -- (otherwise, it would have been changed back to the orig button)
+  -- so let's deal!
+  local playerList = getSortedSeatedPlayers()
+  if (#playerList==1) then
+    broadcastToAll("Playing alone? How sad for you.","Yellow")
+    broadcastToAll("Also.. it doesn't work.","Yellow")
+    broadcastToAll("Maybe try my cousin Solitaire?","Yellow")
+    return
+  end
+  if (#playerList<2 or #playerList>4) then
+    broadcastToAll("Only 2-4 players are supported.","Yellow")
+    return
+  else
+    gbDealing=true
+    mainDeck = initializeHand()
+    Wait.time(function() initializeVariables() dealDeck(mainDeck) end, 1.0)
+    debug("md1: " .. mainDeck.guid)
+  end
+end
+
+-- =============================================================================
+function ClearScores()
+  -- name says it all.. reset the scores in the array to zero
+  gtScores = {[1]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0},
+            [2]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0},
+            [3]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0},
+            [4]={[1]=0,[2]=0,[3]=0,[4]=0,[5]=0}}
+end
+
+-- =============================================================================
+function resetScoresheet()
+  -- clear scores and redisplay the scoresheet
+  ClearScores()
+  refreshScoresheet()
+end
+
+-- =============================================================================
+function setHand(iNewHand)
+  -- a new hand is being requested.  The number might have been indexed beyond
+  -- 4, if so, it means a new game and we'll clear the scores.
+  giHand=iNewHand
+  copyScores()
+  if (giHand>4) then
+    giHand=1
+    printToAll("Starting a new game!")
+    printToAll("previous scores were recorded to a notebook tab")
+    ClearScores()
+  end
+end
+
+-- =============================================================================
+function getSortedSeatedPlayers()
+  -- get the seated players and return a table of them, sorted by
+  -- the seat number in playerStuff (clockwise from white=1)
+  local lplayerList = getSeatedPlayers()
+  table.sort(lplayerList,function (e1, e2) return playerStuff[e1].num < playerStuff[e2].num end )
+  return lplayerList
+end
+
+-- =============================================================================
+function setPlayers(tPlayerList)
+  -- Make sure the table is primed for the number of players we have
+  -- (score zones, etc.. )  if we're not passed a list of players
+  -- then get our own
+  if (not tPlayerList) then
+    tPlayerList = getSortedSeatedPlayers()
+  end
+  if (#tPlayerList!=giPlayerCount) then
+    giPlayerCount=#tPlayerList
+  end
+  layoutScoreZones(giPlayerCount)
+
+end
+
+
+-- =============================================================================
+function dealDeck(oMainDeck)
+  -- one of the main functions.. this deals out the cards to all playerStuff
+  -- mainDeck - the deck from which to deal
+--   gbDealing = true  -now done before this call by the click function
+  bRunScoring= false
+  playerList = getSortedSeatedPlayers()
+  if (not giPlayerCount) then
+    giPlayerCount = #playerList
+  end
+  setPlayers(playerList)
+  setButtons()
+  text_score_white.TextTool.setValue(" ")
+  text_score_blue.TextTool.setValue(" ")
+  text_score_green.TextTool.setValue(" ")
+  text_score_red.TextTool.setValue(" ")
+  setHand(giHand+1)
+  refreshScoresheet()
+
+  textDiscardValue.TextTool.setValue(" ")
+  textDiscardValue.TextTool.setFontColor("Black")
+
+  --log ("oMainDeck g:" .. oMainDeck.guid)
+  --log("foot deal")
+  for i = 1,giStartFootCards do
+    for iP, playerColor in ipairs(playerList) do
+--      log(objScoreZones[giPlayerCount][playerColor].footPos)
+      Wait.time(function() local card = oMainDeck.dealToColorWithOffset({objScoreZones[giPlayerCount]["Colors"][playerColor].footPos[1],objScoreZones[giPlayerCount]["Colors"][playerColor].footPos[2]+(i),objScoreZones[giPlayerCount]["Colors"][playerColor].footPos[3]} ,false, playerColor)  end, (iP/#playerList/2 + i/2)*gfDealDelayMult )
+    end
+  end
+  --log("hand deal")
+  for j=1,giStartHandCards do
+    for iP2, splayerColor in ipairs(playerList) do
+--      Wait.time(function() addToPlayer(playerColor, oMainDeck.dealToColorWithOffset({0,1,0}, true, playerColor)) end, giStartFootCards/3 + i/3)
+      Wait.time(function() oMainDeck.deal(1,splayerColor) end, (giStartFootCards/2 +2+ iP2/#playerList/2 + j/2)*gfDealDelayMult)
+    --local dealt= oMainDeck.dealToColorWithOffset({0,1,0}, true, playerColor)
+      --addToPlayer(playerColor, dealt)
+    end
+  end
+  -- Wait a while till we're pretty sure we're done dealing and then reflect that
+  Wait.time(function() doneDealing(oMainDeck) end, (giStartFootCards/2 + giStartHandCards/2 +  3)*gfDealDelayMult+1)
+end
+
+-- =============================================================================
+function doneDealing(oMainDeck)
+  -- we're done dealing, do wrapup stuff (flip first discard, etc.)
+
+  if (giRuleSet == giCaliforniaRules) then
+      -- flip out the discard.  if it's wild or red-3, shuffle it in and try again
+      local obj = oMainDeck.takeObject({position = obj_Zone_Discard.getPosition(), flip=true})
+      local shortColor, shortName, _ = cardDeets(obj)
+      if (shortColor == "Wild") or (shortColor == "Red" and shortName=="3") then
+        oMainDeck.putObject(obj)
+        oMainDeck.shuffle()
+        doneDealing(oMainDeck)
+        return
+      end
+  end
+
+  if (giHand==1) then
+    gsFirstToGoFirstColor = whoIsFirst()
+  end
+  playerList = getSortedSeatedPlayers()
+  debug("Trying-----------"..gsFirstToGoFirstColor, "order")
+  debug("firsttogofirst="..gsFirstToGoFirstColor,"first")
+
+-- No first to go first if resettting the table mid-Game
+  debug("firsttogofirst.index="..gsSortedPlayerScoresheetIndex[gsFirstToGoFirstColor],"first")
+  debug("hand="..giHand,"first")
+  debug("#playerList="..#playerList,"first")
+  local iFirstIndex = ((gsSortedPlayerScoresheetIndex[gsFirstToGoFirstColor]+giHand-2)%#playerList)+1
+  debug("playerlist...","first")
+  debug(playerList,"first")
+  debug("firstindex="..iFirstIndex,"first")
+  debug("t1", "seated")
+  gsGoesFirstColor = playerList[iFirstIndex]
+  debug("t2", "seated")
+  if (gb_USE_TURNS) then
+    debug("t2.1", "seated")
+    Turns.turn_color=gsGoesFirstColor
+  end
+  debug("t3", "seated")
+  debug("gsGoesFirst="..gsGoesFirstColor,"first")
+  refreshScoresheet()
+  debug("t4", "seated")
+  broadcastToAll(coolName(gsGoesFirstColor) .. " Goes First!")
+
+  Wait.time(function() gbDealing = false end, 2.0)
+
+end
+
+-- =============================================================================
+function setButtons()
+  -- wipe and recreate the buttons on the surface of the table
+  -- which buttons get created and what they do is sometimes
+  -- driven by app state and preferences
+debug("set buttons","buttons")
+goSurface = getObjectFromGUID(UI_TABLETOP_SURFACE)
+
+  goSurface.clearButtons()
+
+  if (bRunScoring) then
+    goSurface.createButton({
+        click_function="click_ToggleScoring",label="Toggle Scoring" ,function_owner=self,
+        position={-15.5,11,17.5}, rotation={0,180,0}, height=175, width=1000,
+        color={1,1,0}, tooltip="Toggle Scoring"
+    })
+  else
+    goSurface.createButton({
+        click_function="click_ToggleScoring",label="Toggle Scoring" ,function_owner=self,
+        position={-15.5,11,17.5}, rotation={0,180,0}, height=175, width=1000,
+        color={1,1,1}, tooltip="Toggle Scoring"
+    })
+  end
+
+  if (giRuleSet == giCaliforniaRules) then
+    debug("cali","buttons")
+    goSurface.createButton({
+        click_function="click_ToggleRules",label="California Rules" ,function_owner=self,
+        position={-15.5,11,17}, rotation={0,180,0}, height=175, width=1000,
+        color={1,1,0}, tooltip="Switch Rules"
+    })
+  elseif (giRuleSet==giNorthCarolinaRules) then
+    debug("cali","buttons")
+    goSurface.createButton({
+        click_function="click_ToggleRules",label="North Carolina Rules" ,function_owner=self,
+        position={-15.5,11,17}, rotation={0,180,0}, height=175, width=1000,
+        color={0,.5,0}, tooltip="Switch Rules"
+    })
+  end
+
+  if (giNewgameCountdown>6) then
+    giNewgameCountdown = giNewgameCountdown - 1
+    goSurface.createButton({
+        click_function="doNothing",label="Hold... ("..giNewgameCountdown..")" ,function_owner=self,
+        position={-15.5,11,16.5}, rotation={0,180,0}, height=175, width=600,
+        color={0,1,0}, tooltip=""
+    })
+    Wait.time(function() setButtons() end, 2.0)
+  elseif (giNewgameCountdown<2) then
+    giNewgameCountdown=0
+    goSurface.createButton({
+        click_function="click_NewGame",label="New Game" ,function_owner=self,
+        position={-15.5,11,16.5}, rotation={0,180,0}, height=175, width=600,
+        color={1,1,1}, tooltip="Start a new game"
+    })
+  else
+    giNewgameCountdown = giNewgameCountdown - 1
+    goSurface.createButton({
+        click_function="click_NewGameSure",label="Confirm? ("..giNewgameCountdown..")" ,function_owner=self,
+        position={-15.5,11,16.5}, rotation={0,180,0}, height=175, width=600,
+        color={1,0,0}, tooltip="Be very sure"
+    })
+    Wait.time(function() setButtons() end, 2.0)
+  end
+
+  if gbShowDirButtons then
+    pos = {x=-5, y=11, z=-5}
+    goSurface.createButton({
+        click_function="click_DoNothing",label="x ".. pos.x .. "     z " .. pos.z,function_owner=self,
+        position=pos, rotation={0,180,0}, height=475, width=2000, font_size=400,
+        color={1,1,0}, tooltip=""
+    })
+    pos = {x=-5, y=11, z=5}
+    goSurface.createButton({
+        click_function="click_DoNothing",label="x ".. pos.x .. "     z " .. pos.z,function_owner=self,
+        position=pos, rotation={0,180,0}, height=475, width=2000, font_size=400,
+        color={1,1,0}, tooltip=""
+    })
+    pos = {x=5, y=11, z=-5}
+    goSurface.createButton({
+        click_function="click_DoNothing",label="x ".. pos.x .. "     z " .. pos.z,function_owner=self,
+        position=pos, rotation={0,180,0}, height=475, width=2000, font_size=400,
+        color={1,1,0}, tooltip=""
+    })
+    pos = {x=5, y=11, z=5}
+    goSurface.createButton({
+        click_function="click_DoNothing",label="x ".. pos.x .. "     z " .. pos.z,function_owner=self,
+        position=pos, rotation={0,180,0}, height=475, width=2000, font_size=400,
+        color={1,1,0}, tooltip=""
+    })
+  end
+
+end
+
+-- =============================================================================
+function stackCards()
+  -- grab up all cards from everywhere and plunk them in a deck in the
+  -- center section of the table (for starting over a new game, generally)
+  local main = nil
+  local tblObj = getAllObjects()
+  for _, one in ipairs(tblObj) do
+    if (one.tag=="Card") or (one.tag=="Deck") then
+      if not ((one.tag=="Deck") and (one.getQuantity()>900)) then
+        if (not main) then
+          --log("Got Main")
+          main = one
+          main.setRotation({180,0,0})
+          main.setPosition({-2,2,0.35})
+        else
+          main.putObject(one)
+        end
+        --log(one.guid)
+      end
+    end
+  end
+
+  if (main) then
+  --  Wait.time(function() main.randomize() end,0.25,8)
+  end
+  debug("**stacking done")
+  return main
+end
+
+-- =============================================================================
+function initializeVariables()
+  -- set up values for a new Game
+  giInsertCount = 0
+  tableDiscard = {}
+  textScore.TextTool.setValue(" ")
+  textDiscardValue.TextTool.setValue(" ")
+  giNewgameCountdown=0
+  bScoreShowing=false
+  if (giRuleSet == giCaliforniaRules) then
+    giStartFootCards=13
+    giStartHandCards=13
+    giRed3Penalty=100
+    giRed3SideStackScore=100
+  elseif (giRuleSet == giNorthCarolinaRules) then
+    giStartFootCards=11
+    giStartHandCards=13
+    giRed3Penalty=300
+    giRed3SideStackScore=300
+  end
+  gbInitializing = false
+end
+
+-- =============================================================================
+function initializeGame()
+  -- Start up a brand new game.  Hand = zero, blank the scoresheet and start a new hand
+  setHand(0)
+  resetScoresheet()
+  initializeHand()
+end
+
+
+-- =============================================================================
+function initializeHand()
+  -- fire up a new hand... save the old scores, restack cards, and shuffle
+  gbInitializing = true
+  copyScores()
+  local maindeck = stackCards()
+  initializeVariables()
+  debug("Initialized...")
+  maindeck.shuffle()   -- one shuffle is enough but many is pretty
+  maindeck.shuffle()
+  maindeck.shuffle()
+  maindeck.shuffle()
+  maindeck.shuffle()
+  Wait.time(function () maindeck.shuffle() end, 0.5 ,5)  -- a little delay, just to make it last longer.. still just cosmetic after the first
+  return maindeck
+end
+
+-- =============================================================================
+function SaveScores()
+  -- get the scores from the scoresheet and save them to the gtScores table
+  for player = 1, gi_NUM_ROWS do
+    local scoreT = {}
+    for score = 1, gi_NUM_COLUMNS do
+      local scoreId = "P".. player .."R".. score .. "Score"
+--      debug("saving " .. scoreId, "panel" )
+--      debug(UI.getAttribute(scoreId, "text"),"panel")
+      table.insert(scoreT, UI.getAttribute(scoreId, "text"))
+    end
+    gtScores[player] = scoreT;
+  end
+end
+
+-- =============================================================================
+function onSave()
+  debug("saved-----------", "loaded")
+  local t = {
+    ["f2gfc"] = gsFirstToGoFirstColor,
+    ["scores"] = gtScores,
+  }
+  saved_data = JSON.encode(t)
+  debug("saving-----------", "loaded")
+  debug(saved_data, "loaded")
+
+  return saved_data
+
+end
+
+
+function onLoad(saved_data)
+--  --Load Data
+  if saved_data ~= "" then
+    debug("Loading saved data!","loaded")
+    debug(saved_data,"loaded")
+    local loaded_data = JSON.decode(saved_data)
+    --Set Global Variables
+    gtScores        = loaded_data.scores
+    gsFirstToGoFirstColor = loaded_data.f2gfc
+  end
+
+--  SOUND_CUBE = '8d1d25'
+debug("loaded-----------", "loaded")
+log("Loaded")
+log("*************************************************")
+log("*************************************************")
+log("*************************************************")
+SOUND_CUBE = 'a98418' -- This is the new sound cube
+soundCube = getObjectFromGUID(SOUND_CUBE)
+
+  FOOTNOTE_TEXT_WHITE = '342071'
+  FOOTNOTE_TEXT_BLUE = '6def21'
+  FOOTNOTE_TEXT_GREEN = 'ea9d5a'
+  FOOTNOTE_TEXT_RED = 'dd2fa4'
+  textFootNotes = {}
+  textFootNotes["White"] = getObjectFromGUID(FOOTNOTE_TEXT_WHITE)
+  textFootNotes["Green"] = getObjectFromGUID(FOOTNOTE_TEXT_GREEN)
+  textFootNotes["Blue"] = getObjectFromGUID(FOOTNOTE_TEXT_BLUE)
+  textFootNotes["Red"] = getObjectFromGUID(FOOTNOTE_TEXT_RED)
+
+
+
+  WALL_1 = '907e11'
+  WALL_2 = '00bb0a'
+  WALL_3 = '4d78c6'
+  WALL_4 = 'f0f4fa'
+
+  objWalls = {
+    [1] = getObjectFromGUID(WALL_1),
+    [2] = getObjectFromGUID(WALL_2),
+    [3] = getObjectFromGUID(WALL_3),
+    [4] = getObjectFromGUID(WALL_4),
+  }
+
+  SCORE_TEXT_WHITE = '4a3157'
+  SCORE_TEXT_BLUE = '67ea6c'
+  SCORE_TEXT_GREEN = '3e97b1'
+  SCORE_TEXT_RED= 'e51db7'
+  text_score_white = getObjectFromGUID(SCORE_TEXT_WHITE)
+  text_score_blue = getObjectFromGUID(SCORE_TEXT_BLUE)
+  text_score_green = getObjectFromGUID(SCORE_TEXT_GREEN)
+  text_score_red  = getObjectFromGUID(SCORE_TEXT_RED)
+  text_score_white.TextTool.setValue(" ")
+  text_score_blue.TextTool.setValue(" ")
+  text_score_green.TextTool.setValue(" ")
+  text_score_red.TextTool.setValue(" ")
+
+  obj_scoretext = {["White"]=text_score_white,["Blue"]=text_score_blue,["Green"]=text_score_green,["Red"]=text_score_red,}
+
+
+  ZONE_WHITE_SCORE1 = '6346d6'
+  ZONE_WHITE_SCORE2 = '2f7232'
+  ZONE_BLUE_SCORE2 = '517503'
+  ZONE_BLUE_SCORE1 = '24e3af'
+  ZONE_GREEN_SCORE1 = '4685c1'
+
+  ZONE_SCORE_A = '6346d6' -- White Big
+  ZONE_SCORE_B = '2f7232' -- White Sliver1
+  ZONE_SCORE_C = '517503' -- Green big
+  ZONE_SCORE_D = '24e3af' -- Blue Sliver1
+  ZONE_SCORE_E = '4685c1' -- Blue big
+  ZONE_SCORE_F = '23bb9b' -- Red big
+  ZONE_SCORE_G = 'ccc9e6' -- Blue Sliver2
+  ZONE_SCORE_H = '67630d' -- White Sliver2
+  objAllScoreZones={}
+  objAllScoreZones[1]=getObjectFromGUID(ZONE_SCORE_A)
+  objAllScoreZones[2]=getObjectFromGUID(ZONE_SCORE_B)
+  objAllScoreZones[3]=getObjectFromGUID(ZONE_SCORE_C)
+  objAllScoreZones[4]=getObjectFromGUID(ZONE_SCORE_D)
+  objAllScoreZones[5]=getObjectFromGUID(ZONE_SCORE_E)
+  objAllScoreZones[6]=getObjectFromGUID(ZONE_SCORE_F)
+  objAllScoreZones[7]=getObjectFromGUID(ZONE_SCORE_G)
+  objAllScoreZones[8]=getObjectFromGUID(ZONE_SCORE_H)
+
+
+  objScoreZones={
+      -- Create 2P layout
+      [2]= {
+        ["Walls"] = {
+          [1] = {-- blue tint
+            ["scl"] = {0.10, 1.00, 14.21},  ["pos"] = {20.39, 2.00, -0.04},
+          },
+          [2] = {-- red tint
+            ["scl"] = {0.10, 1.00, 14.39},  ["pos"] = {-20.54, 2.00, -0.08},
+          },
+          [3] = {-- green tint
+            ["scl"] = {1,1,1},  ["pos"] = {0, -20, 0},
+          },
+          [4] = {-- yellow tint
+            ["scl"] = {1,1,1},  ["pos"] = {0, -20, 0},
+          },
+        },
+        ["Colors"] = {
+          ["White"] = {
+            ["footPos"]= {30,1,35},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[1],
+                ["scl"] ={70.0, 5.0,30.3,},
+                ["pos"] = { 0, 3.5, 20.1,},
+              },
+              [2] = {
+                ["obj"] = objAllScoreZones[2],
+                ["scl"] = {29.20, 5.00, 4.37},
+                ["pos"] = {-20.80, 3.50, 2.95},
+              },
+              [3] = {
+                ["obj"] = objAllScoreZones[3],
+                ["scl"] = {29.20, 5.00, 4.37},
+                ["pos"] = {20.78, 3.50, 2.95},
+              },
+            },
+          },
+          ["Green"] = {
+            ["footPos"]= {},
+            ["zones"] = {},
+          },
+          ["Blue"] = {
+            ["footPos"]={-30,1,35},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[4],
+                ["scl"] = {70.06, 5.00, 30.20},
+                ["pos"] ={0.13, 3.50, -20.90},
+              },
+              [2] = {
+                ["obj"] = objAllScoreZones[5],
+                ["scl"] = {29.20, 5.00, 4.37},
+                ["pos"] = {-20.32, 3.50, -3.44},
+              },
+              [3] = {
+                ["obj"] = objAllScoreZones[6],
+                ["scl"] = {29.20, 5.00, 4.37},
+                ["pos"] = {20.78, 3.50, -3.44},
+              },
+            },
+          },
+          ["Red"] = {
+            ["footPos"]= {},
+            ["zones"] = {},
+          },
+          ["Hide"] = {
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[7],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+              [2] = {
+                ["obj"] = objAllScoreZones[8],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+            },
+          },
+        }, -- end Colors
+      }, -- end 2p
+      [3]= {
+        ["Walls"] = {
+          [1] = {-- blue tint
+            ["scl"] = {31.39, 1.00, 0.10},  ["pos"] = {5.40, 1.95, -19.98},
+          },
+          [2] = {-- red tint
+            ["scl"] = {31.39, 1.00, 0.10},  ["pos"] = {5.41, 1.95, 20.16},
+          },
+          [3] = { -- green tint
+            ["scl"] ={-30.38, 1.00, -0.10},  ["pos"] = {-20.40, 1.95, -0.09},
+          },
+          [4] = { -- yellow tint
+            ["scl"] = {1,1,1},  ["pos"] = {0, -20, 0},
+          },
+        },
+        ["Colors"] = {
+          ["White"] = {
+            ["footPos"]= {30,1,35},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[1],
+                ["scl"] = { ["x"] = 40.0, ["y"] = 5.0,["z"] = 31.3,},
+                ["pos"] = { ["x"] = -16.0,["y"] = 3.5,["z"] = 20.1,},
+              },
+              [2] = {
+                ["obj"] = objAllScoreZones[2],
+                ["scl"] = { ["x"] = 31.0, ["y"] = 5.0,["z"] = 3.7,},
+                ["pos"] = { ["x"] = -19.9,["y"] = 3.5,["z"] = 2.6,},
+              },
+            },
+          },
+          ["Green"] = {
+            ["footPos"]={15,1,30},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[3],
+                ["scl"] = { ["x"] = 29.5,["y"] = 5.0,["z"] = 71.7,},
+                ["pos"] = { ["x"] = 21.2,["y"] = 3.5,["z"] = 0.15,},
+              },
+            },
+          },
+          ["Blue"] = {
+            ["footPos"]={-30,1,35},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[4],
+                ["scl"] = { ["x"] = 40.2,["y"] = 5.0,["z"] = 31.3,},
+                ["pos"] = { ["x"] = -15.5,["y"] = 3.5,["z"] = -19.9,},
+              },
+              [2] = {
+                ["obj"] = objAllScoreZones[5],
+                ["scl"] = { ["x"] = 31.0,["y"] = 5.0,["z"] = 3.7,},
+                ["pos"] = { ["x"] = -19.9,["y"] = 3.5,["z"] = -2.7,},
+              },
+            },
+          },
+          ["Red"] = {
+            ["footPos"]= {},
+            ["zones"] = {},
+          },
+          ["Hide"] = {
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[6],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+              [2] = {
+                ["obj"] = objAllScoreZones[7],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+              [3] = {
+                ["obj"] = objAllScoreZones[8],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+            },
+          },
+        },
+      }, -- end 3p
+      [4]= {
+        ["Walls"] = {
+          [1] = { -- blue tint
+            ["scl"] = {31.19, 1.00, 0.10},  ["pos"] = {5.45, 1.95, -19.90},
+          },
+          [2] = { -- red tint
+            ["scl"] = {29.78, 1.00, 0.10},  ["pos"] = {-5.38, 1.95, 20.14},
+          },
+          [3] = { -- green tint
+            ["scl"] = {30.40, 1.00, 0.10},  ["pos"] = {-20.79, 1.95, -4.26},
+          },
+          [4] = { -- yellow tint
+            ["scl"] = {29.59, 1.00, 0.10},  ["pos"] = {20.54, 1.93, 4.43},
+          },
+        },
+        ["Colors"] = {
+          ["White"] = {
+            ["footPos"]= {-30,1,20},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[1],
+                ["scl"] = { ["x"] = 39.8,["y"] = 5.0,["z"] = 30.3,},
+                ["pos"] = { ["x"] = 15.3,["y"] = 3.5,["z"] = 20.5,},
+              },
+            },
+          },
+          ["Green"] = {
+            ["footPos"]= {-30,1,20},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[2],
+                ["scl"] = { ["x"] = 28.8, ["y"] = 5.0,["z"] = 38.3,},
+                ["pos"] = { ["x"] = 20.8,["y"] =  3.5,["z"] = -15.96,},
+              },
+            },
+          },
+          ["Blue"] = {
+            ["footPos"]= {-30,1,20},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[3],
+                ["scl"] = { ["x"] = 39.8,["y"] = 5.0,["z"] = 30.2,},
+                ["pos"] = { ["x"] = -15,["y"] = 3.5,["z"] = -20.9,},
+              },
+            },
+          },
+          ["Red"] = {
+            ["footPos"]= {-30,1,20},
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[4],
+                ["scl"] = { ["x"] = 29.2,["y"] = 5.0,["z"] = 38.9,},
+                ["pos"] = { ["x"] = -20.8,["y"] = 3.5,["z"] = 16.9,},
+              },
+            },
+          },
+          ["Hide"] = {
+            ["zones"] = {
+              [1] = {
+                ["obj"] = objAllScoreZones[5],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+              [2] = {
+                ["obj"] = objAllScoreZones[6],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+              [3] = {
+                ["obj"] = objAllScoreZones[7],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+              [4] = {
+                ["obj"] = objAllScoreZones[8],
+                ["scl"] = { ["x"] = 1,["y"] = 1,["z"] = 1,},
+                ["pos"] = { ["x"] = -20.6,["y"] = -40.0,["z"] = 16.2,},
+              },
+            },
+          },
+        }, -- end Colors
+      }, -- end 4P
+  }
+
+--  ["Hide"] = {
+--    [1] = {
+--      ["obj"] = objAllScoreZones[x],
+--      ["scl"] = ,
+--      ["pos"] = ,
+--    },
+  -- Create 4P layout
+
+
+
+  obj_scorezone = {}
+  obj_scorezone["White"]={[1]=getObjectFromGUID(ZONE_WHITE_SCORE1),[2]=getObjectFromGUID(ZONE_WHITE_SCORE2)}
+  obj_scorezone["Green"]={[1]=getObjectFromGUID(ZONE_GREEN_SCORE1)}
+  obj_scorezone["Blue"]={[1]=getObjectFromGUID(ZONE_BLUE_SCORE1),[2]=getObjectFromGUID(ZONE_BLUE_SCORE2)}
+
+  -- writeToNotebookTab("Scale",1)
+  -- writeToNotebookTab("1:" .. dump(objAllScoreZones[1].getScale()),1)
+  -- writeToNotebookTab("2:" .. dump(objAllScoreZones[2].getScale()),1)
+  -- writeToNotebookTab("3:" .. dump(objAllScoreZones[3].getScale()),1)
+  -- writeToNotebookTab("4:" .. dump(objAllScoreZones[4].getScale()),1)
+  -- writeToNotebookTab("5:" .. dump(objAllScoreZones[5].getScale()),1)
+  -- writeToNotebookTab("6:" .. dump(objAllScoreZones[6].getScale()),1)
+  -- writeToNotebookTab("7:" .. dump(objAllScoreZones[7].getScale()),1)
+  -- writeToNotebookTab("8:" .. dump(objAllScoreZones[8].getScale()),1)
+  -- writeToNotebookTab("Position",1)
+  -- writeToNotebookTab("1:" .. dump(objAllScoreZones[1].getPosition()),1)
+  -- writeToNotebookTab("2:" .. dump(objAllScoreZones[2].getPosition()),1)
+  -- writeToNotebookTab("3:" .. dump(objAllScoreZones[3].getPosition()),1)
+  -- writeToNotebookTab("4:" .. dump(objAllScoreZones[4].getPosition()),1)
+  -- writeToNotebookTab("5:" .. dump(objAllScoreZones[5].getPosition()),1)
+  -- writeToNotebookTab("6:" .. dump(objAllScoreZones[6].getPosition()),1)
+  -- writeToNotebookTab("7:" .. dump(objAllScoreZones[7].getPosition()),1)
+  -- writeToNotebookTab("8:" .. dump(objAllScoreZones[8].getPosition()),1)
+
+  ZONE_DISCARD = 'b73d1b'
+  ZONE_WHITE = '99215b'
+  ZONE_BLUE = 'db740e'
+  ZONE_RED = '344fb9'
+  ZONE_GREEN = 'bc6118'
+
+  obj_Zone_Green = getObjectFromGUID(ZONE_GREEN)
+  obj_Zone_Red = getObjectFromGUID(ZONE_RED)
+  obj_Zone_Blue = getObjectFromGUID(ZONE_BLUE)
+  obj_Zone_White = getObjectFromGUID(ZONE_WHITE)
+  obj_Zone_Discard = getObjectFromGUID(ZONE_DISCARD)
+  tDiscardProps={position={x=2.85, y=4.03, z=0.19},scale={3.73, 5.10, 4.09}, rotation={0.00, 358.87, 0.00}}
+  obj_Zone={}
+  obj_Zone["Green"] = obj_Zone_Green
+  obj_Zone["Red"] = obj_Zone_Red
+  obj_Zone["Blue"] = obj_Zone_Blue
+  obj_Zone["White"] = obj_Zone_White
+
+  objTable = getObjectFromGUID('bd69bd')
+
+  bMaskActions=false
+  TEXT_DISCARD_LABEL = 'e12cfa'
+  TEXT_DISCARD_VALUE = '48206b'
+  TEXT_SCORE = '0c201a'
+  UI_TABLETOP_SURFACE = '4ee1f2'
+  UI_CENTER_DECK = '27f04c'
+
+  goSurface = getObjectFromGUID(UI_TABLETOP_SURFACE)
+
+  giNewgameCountdown = 0
+  gbSpreading = false
+  gbDealing = false
+  fromdeck={}
+  fromdiscard={}
+  mainDeck = getObjectFromGUID(UI_CENTER_DECK);
+  giCaliforniaRules = 0
+  giNorthCarolinaRules = 1
+  giNumRuleSets=2
+  giRuleSet = giCaliforniaRules
+  if (giRuleSet == giCaliforniaRules) then
+    announceAll("California Rules In Effect")
+  else
+    announceAll("North Carolina Rules In Effect")
+  end
+  setButtons()
+
+  textDiscardLabel = getObjectFromGUID(TEXT_DISCARD_LABEL)
+  textDiscardValue = getObjectFromGUID(TEXT_DISCARD_VALUE)
+  textScore = getObjectFromGUID(TEXT_SCORE)
+  -- tablePlayerCards = nil
+  -- tablePlayerDecks = nil
+
+  abAutoLayout={}
+  abAutoLayout["White"]=true
+  abAutoLayout["Red"]=true
+  abAutoLayout["Blue"]=true
+  abAutoLayout["Green"]=false
+
+
+  if not (playerStuff) then
+    playerStuff={
+      ["White"] ={num=1,
+                  bShowFootNotes=false,   bQueuedFootNoteCheck=false,
+                  bScoreVisible=true,
+                  bAlign=1,
+                  bAutoLayout=true,
+                  bMaskActions=false,
+                  bReallySort = false, iSortWaiter=0,  bSortLowLeft = true,   bSortAceHigh=true, sSortMetaOrder="wbpa3r>",
+                  bSpreading=false, bSpreadQueued=false,
+                  footPos={30,1,35} },
+      ["Green"] = {num=2,
+                  bShowFootNotes=false, bQueuedFootNoteCheck=false,
+                  bScoreVisible=true,
+                  bAlign=1,
+                  bAutoLayout=true,
+                  bMaskActions=false,
+                  bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="3apbwl<",
+                  bSpreading=false, bSpreadQueued=false,
+                  footPos={15,1,30}},
+      ["Blue"] = {num=3,
+                  bShowFootNotes=true, bQueuedFootNoteCheck=false,
+                  bScoreVisible=true,
+                  bAlign=1,
+                  bAutoLayout=true,
+                  bMaskActions=false,
+                  bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="ar",
+                  bSpreading=false, bSpreadQueued=false,
+                  footPos={-30,1,35}},
+      ["Red"] = {num=4,
+                  bShowFootNotes=true, bQueuedFootNoteCheck=false,
+                  bScoreVisible=true,
+                  bAlign=1,
+                  bAutoLayout=true,
+                  bMaskActions=false,
+                  bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="a",
+                  bSpreading=false, bSpreadQueued=false,
+                  footPos={-30,1,35}}
+    }
+  end
+    processSortCommand("White", playerStuff["White"].sSortMetaOrder)
+    processSortCommand("Red", playerStuff["Red"].sSortMetaOrder)
+    processSortCommand("Blue", playerStuff["Blue"].sSortMetaOrder)
+    processSortCommand("Green", playerStuff["Green"].sSortMetaOrder)
+    displaySort("White", "White", playerStuff["White"].sSortMetaOrder)
+    displaySort("Red", "Red", playerStuff["Red"].sSortMetaOrder)
+    displaySort("Green", "Green", playerStuff["Green"].sSortMetaOrder)
+    displaySort("Blue", "Blue", playerStuff["Blue"].sSortMetaOrder)
+
+--  end
+
+  addHotkey("Fix Books", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      fixBooks()
+      Player[playerColor].print("Fix Books", {r=0, g=1, b=1})
+    end
+  end, true)
+
+  addHotkey("Toggle Scoring", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      click_ToggleScoring(_, playerColor)
+      --objTable.call("updateSurfaceByURL","seconddb.com/GreenFeltFullSquare2pv2.png")
+      --tb.call("click_loadMemory_wrapper", {1, "White", 3})
+    end
+  end, true);
+
+  -- addHotkey("Deckem (RUINS GAME)", function (playerColor, object, pointerPosition, isKeyUp)
+  --   if (isKeyUp) then
+  --     admin_deckem()
+  --   end
+  -- end, true);
+
+  addHotkey("Layout Selection (DESTRUCTIVE)", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      vRot = obj_Zone[playerColor].getRotation()
+      layoutLargeSelection(playerColor, vRot)
+    end
+  end, true);
+
+
+  addHotkey("Sort Hand", function (playerColor, object, pointerPosition, isKeyUp)
+  if (isKeyUp) then
+--      if (playerStuff[playerColor].bReallySort) then
+      if (true) then
+        playerStuff[playerColor].bReallySort = false
+        playerStuff[playerColor].iSortWaiter = 0
+        Wait.stop(playerStuff[playerColor].iSortWaiter)
+        sortHand(self, playerColor)
+      else
+        Player[playerColor].broadcast("Press again to sort (10s)")
+        playerStuff[playerColor].bReallySort=true
+        playerStuff[playerColor].iSortWaiter = Wait.time(function() playerStuff[playerColor].bReallySort=false; playerStuff[playerColor].iSortWaiter = 0 end,10.0)
+      end
+  end
+end, true)
+
+
+
+  addHotkey("Draw 2", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      if mainDeck then
+--        mainDeck.deal(1,playerColor)
+--        mainDeck.deal(1,playerColor)
+        mainDeck.deal(1,playerColor)
+        Wait.time(function() mainDeck.deal(1,playerColor) end, 0.25)
+      end
+    end
+  end, true)
+
+  addHotkey("Calc ## Scores", function (playerColor, object, pointerPosition, isKeyUp)
+    checkNotes()
+  end, true)
+
+  addHotkey("Draw 1", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      if mainDeck then
+--        mainDeck.deal(1,playerColor)
+--        mainDeck.deal(1,playerColor)
+        mainDeck.deal(1,playerColor)
+      end
+    end
+  end, true)
+
+  addHotkey("Layout Pretty", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      spread3("s",playerColor,1)
+    end
+  end, true)
+
+  addHotkey("Toggle AutoAlign", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      playerStuff[playerColor].bAlign=playerStuff[playerColor].bAlign*-1
+      broadcastToColor("Alignment set to " .. gt_ALIGN_WORDS[playerStuff[playerColor].bAlign],playerColor)
+    end
+  end, true);
+
+  addHotkey("Toggle Auto Layout", function (playerColor, object, pointerPosition, isKeyUp)
+    if (isKeyUp) then
+      playerStuff[playerColor].bAutoLayout = not playerStuff[playerColor].bAutoLayout
+      if (playerStuff[playerColor].bAutoLayout) then
+        Player[playerColor].print("Auto Layout On")
+      else
+        Player[playerColor].print("Auto Layout Off")
+      end
+    end
+  end, true)
+
+  addHotkey("Mask Movements", function(playerColor, object, pointerPosition, isKeyUp)
+      local action = isKeyUp and "released" or "pressed"
+      playerStuff[playerColor].bMaskActions = not isKeyUp
+      if (playerStuff[playerColor].bMaskActions) then
+        print(playerColor .. " " .. action .. " the hotkey... Masking Actions")
+      else
+        print(playerColor .. " " .. action .. " the hotkey... Not Masking Actions")
+      end
+      setButtons()
+  end, true)
+
+--  refreshScoresheet()
+  --initializeGame()
+  Wait.time(function () startLuaCoroutine(self, 'hoverTroll') end, 1,-1)
+  -- Wait.time(function () startLuaCoroutine(self, 'checkNotes') end, 5,-1)
+  Wait.time(function () setPlayers() end, 1)
+
+  -- autodeal
+  --click_NewGameSure(_, "White")
+end
+
+-- =============================================================================
+function fixBooks()
+  debug("Fix Books", "fixbooks")
+  for sColor, oScoreZones in pairs(objScoreZones[giPlayerCount]["Colors"]) do
+    debug("Starting Score " .. sColor,"score")
+    if (sColor!="Hide" and Player[sColor].seated) then
+      for _, oPlayZone in pairs(oScoreZones.zones) do
+        for _, oObject in pairs(oPlayZone.obj.getObjects()) do
+          if (oObject.tag=="Deck") then
+            scoreTarget(oObject)
+          end
+        end
+      end
+    end
+  end
+end
+
+-- =============================================================================
+function admin_sinkWalls()
+  for i, oWallProps in pairs(objScoreZones[2]["Walls"]) do
+    local p = objWalls[i].getPosition()
+    objWalls[i].setPosition({p.x, -5, p.z})
+  end
+  for sColor, oColors in pairs(objScoreZones[2]["Colors"]) do
+    for iZone, oZone in pairs(oColors.zones) do
+      local p = oZone.obj.getPosition()
+      oZone.obj.setPosition({p.x, -5, p.z})
+    end
+  end
+  obj_Zone_Discard.setPosition({tDiscardProps.position.x,-10, tDiscardProps.position.z })
+
+
+end
+
+
+function layoutScoreZones(iPlayers)
+  debug("laying out for " .. iPlayers,"weird")
+  obj_Zone_Discard.setPosition(tDiscardProps.position)
+  obj_Zone_Discard.setRotation(tDiscardProps.rotation)
+  obj_Zone_Discard.setScale(tDiscardProps.scale)
+  if (objScoreZones[iPlayers]) then
+    if (iPlayers != giCurNumPlayersOnFelt) then
+      objTable.call("updateSurfaceByURL","seconddb.com/GreenFeltFullSquare"..iPlayers.."pv2.png")
+      giCurNumPlayersOnFelt = iPlayers
+    end
+    for sColor, oColors in pairs(objScoreZones[iPlayers]["Colors"]) do
+      for iZone, oZone in pairs(oColors.zones) do
+        oZone.obj.setPosition(oZone.pos)
+        oZone.obj.setScale(oZone.scl)
+      end
+    end
+    for i, oWallProps in pairs(objScoreZones[iPlayers]["Walls"]) do
+      objWalls[i].setScale(oWallProps.scl)
+      objWalls[i].setPosition(oWallProps.pos)
+      objWalls[i].setPositionSmooth(oWallProps.pos,false)
+      local tint = objWalls[i].getColorTint()
+      tint.a = 0
+      objWalls[i].setColorTint(tint)
+    end
+    debug("laying out setbuttons","weird")
+    setButtons()
+  else
+    log("Not enough players yet (or too many)")
+  end
+end
+
+
+function countScore()
+  if (bRunScoring) then
+    local scores = countScoreInternal()
+    for sColor, iScore in pairs(scores) do
+      obj_scoretext[sColor].TextTool.setValue(" " .. iScore)
+    end
+  end
+  if (bRunScoring) then
+    Wait.time(function () startLuaCoroutine(self, 'countScore') end, 5)
+  end
+  return 1
+end
+
+function countScoreInternal()
+  local doneGUIDs = {}
+  local scores = {}
+  local tBookCount = {["White"]={[gi_BLACK_BOOK_SCORE]=0, [gi_RED_BOOK_SCORE]=0, [gi_WILD_BOOK_SCORE]=0},
+                      ["Green"]={[gi_BLACK_BOOK_SCORE]=0, [gi_RED_BOOK_SCORE]=0, [gi_WILD_BOOK_SCORE]=0},
+                      ["Blue"] ={[gi_BLACK_BOOK_SCORE]=0, [gi_RED_BOOK_SCORE]=0, [gi_WILD_BOOK_SCORE]=0},
+                      ["Red"]  ={[gi_BLACK_BOOK_SCORE]=0, [gi_RED_BOOK_SCORE]=0, [gi_WILD_BOOK_SCORE]=0},
+                    }
+--  objScoreZones={
+      -- Create 3P layout
+--      [2]= {
+--        ["White"] = {
+--          [1] = {
+--            ["obj"] = objAllScoreZones[1],
+--            ["scl"] ={70.0, 5.0,30.3,},
+
+
+  for sColor, scoreZones in pairs(objScoreZones[giPlayerCount]["Colors"]) do
+    debug("Starting Score " .. sColor,"score")
+    if (sColor!="Hide" and Player[sColor].seated) then
+      local iScore = 0
+
+      -- First, get the score from the hand and negative-it
+      if (obj_Zone[sColor]) then
+        for _, occupyingObject in ipairs(obj_Zone[sColor].getObjects()) do
+            local rawScore = 0
+            local bookScore = 0
+            debug("Scoring " .. occupyingObject.tag ,"score")
+            rawScore, dckDesc, bookScore = scoreTarget(occupyingObject)
+  --          debug("scored as " .. rawScore .. ", " .. bookScore, "score")
+            if (rawScore) then
+              iScore = iScore - rawScore
+            end
+            if (bookScore) then
+              iScore = iScore - bookScore
+            end
+        end
+      end
+
+      -- if Nothing is in their hand, they've gone out, so add 500 and
+      -- make it pretty yellow
+      if iScore==0 then
+        iScore = 500
+        obj_scoretext[sColor].TextTool.setFontColor("Yellow")
+      else
+        obj_scoretext[sColor].TextTool.setFontColor("Grey")
+      end
+
+      for j=1,#scoreZones.zones do
+        debug("Starting Score " .. sColor .. ", " .. j,"score")
+        for _, occupyingObject in ipairs(scoreZones.zones[j].obj.getObjects()) do
+            if (tablefind(doneGUIDs, occupyingObject.guid)==-1) then
+              local rawScore = 0
+              local bookScore = 0
+              debug("Scoring " .. occupyingObject.tag ,"score")
+              rawScore, dckDesc, bookScore = scoreTarget(occupyingObject)
+    --          debug("scored as " .. rawScore .. ", " .. bookScore, "score")
+              if (rawScore) then
+                iScore = iScore + rawScore
+              end
+              if (bookScore) then
+                if (bookScore!=0) then
+                  tBookCount[sColor][bookScore]=tBookCount[sColor][bookScore]+1
+                end
+                iScore = iScore + bookScore
+              end
+              tablepush(doneGUIDs,occupyingObject.guid)
+            end
+        end
+      end
+      --announceAll("score " .. sColor .. " = " .. iScore)
+      scores[sColor] = iScore
+      debug("score " .. sColor .. " = " .. iScore, "score")
+    end
+  end
+  return scores, tBookCount
+end
+
+function whoIsFirst()
+  local doneGUIDs = {}
+  local bottomCards = {}
+  local candidatePlayers = {}
+  local iCardIndex = 0 -- if we have to do more than one test, this is the modifier to get the second to last, thrid to last...
+
+  -- get the candidate players
+  -- we need this b/c we may end up looping
+  -- if there's a tie
+  playerList = getSortedSeatedPlayers()
+  for iP, playerColor in ipairs(playerList) do
+    tablepush(candidatePlayers,playerColor)
+  end
+
+  debug("===================================","first" )
+  debug("checking first","first" )
+  repeat
+    bottomCards = {}
+    doneGUIDs = {}
+    -- Find the scorezones that exist.. loop through them
+    for sColor, scoreZones in pairs(objScoreZones[giPlayerCount]["Colors"]) do
+      debug("... checking " .. sColor,"first")
+      -- Make sure someone is still a candidate, otherwise, ignore
+      if (tablefind(candidatePlayers,sColor)!=-1) then
+        debug("... found " .. sColor .. " in candidates","first")
+        -- go through each of this color's scorezones
+        for j=1,#scoreZones.zones do
+          -- find all the things in the zone
+          for _, occupyingObject in ipairs(scoreZones.zones[j].obj.getObjects()) do
+            -- make sure we haven't looked at this one before (in case it's strattling)
+            if (tablefind(doneGUIDs, occupyingObject.guid)==-1) then
+              --debug("... found a " .. occupyingObject.tag ,"first")
+              if (occupyingObject.tag == "Deck") then
+                contents = occupyingObject.getObjects()
+                if (contents) then
+                  if (bottomCards[sColor]) then
+                    broadcastToAll(sColor .. " seems to have multiple decks.  Can't determine who goes first.")
+                    return "None"
+                  end
+                  --debug("In Contents...","first")
+                  --debug("contents = " .. #contents,"first")
+                  --debug(contents,"first")
+                  _, shortName, shortSuit = cardDeets(contents[#contents-iCardIndex])
+                  --debug("... kicker= " .. shortName .. " " .. shortSuit,"first")
+                  bottomCards[sColor]=shortName
+                end
+                tablepush(doneGUIDs,occupyingObject.guid)
+              end
+            end
+          end
+        end
+        if (not bottomCards[sColor]) then
+          broadcastToAll(sColor .. " seems to not have a foot deck.  Can't determine who goes first.")
+          return "None"
+        end
+      end
+    end
+
+    -- we have a table of bottomCards.. so lets go through them and find the highest
+    setSortOrder(true,true)
+    debug("bottomcards = ...","first")
+    debug(bottomCards, "first")
+    local sTopCard = ""
+    candidatePlayers = {}
+    for sBCColor, sCardName in pairs(bottomCards) do
+      broadcastToAll(coolName(sBCColor) .. " has a " .. sCardName)
+      if ( (sTopCard=="") or (refCardOrderIndex[sCardName] > refCardOrderIndex[sTopCard]) ) then
+        sTopCard = sCardName
+        candidatePlayers = {}
+        tablepush(candidatePlayers,sBCColor)
+      end
+      if ( ( sTopCard != "") and (refCardOrderIndex[sCardName] == refCardOrderIndex[sTopCard]) ) then
+        tablepush(candidatePlayers,sBCColor)
+      end
+      --debug("testing " .. sCardName .. " for " .. sBCColor,"first")
+    end
+    debug("candidates = ...", "first")
+    debug(candidatePlayers, "first")
+    iCardIndex = iCardIndex + 1
+    debug("iCardIndex = " .. iCardIndex,"first")
+    if (#candidatePlayers>1) then
+      broadcastToAll("There was a tie.. checking the next card down.")
+    end
+  until (#candidatePlayers==1 or iCardIndex>12)
+
+--  broadcastToAll(coolName(candidatePlayers[1]) .. " goes first!")
+  debug("First is " .. candidatePlayers[1],"first")
+  --gsGoesFirstColor = candidatePlayers[1]
+  gsFirstToGoFirstColor = candidatePlayers[1]
+  --refreshScoresheet()
+  return candidatePlayers[1]
+end
+
+
+
+
+function coWait(secs)
+  function e_coroutine()
+    myWait(secs) -- delay
+    return 1
+  end
+  startLuaCoroutine(self, "example_coroutine")
+end
+
+function myWait(frames)
+  frames = frames * 60
+  while frames > 0 do
+      coroutine.yield(0)
+      frames = frames - 1
+  end
+end
+
+
+function calcFormula(s)
+  local sign = 1
+  local total = 0
+  local iPos = 1
+  while 1==1 do
+    if string.sub(s,iPos,iPos)=="-" then
+      sign = -1
+      iPos = iPos +1
+    elseif string.sub(s,iPos,iPos)=="+" then
+      sign = 1
+      iPos = iPos+1
+    end
+    sNum = string.match(s,"[%d]+", iPos)
+    if not sNum then
+      break
+    end
+    total = total + tonumber(sNum)*sign
+    iPos = iPos + string.len(sNum)
+  end
+  return total
+end
+
+-- function click_Score()
+--   local sOut = ""
+--   if (bScoreShowing) then
+--     sOut = " "
+--   else
+--     debug("Scoring.....")
+--     --tableDump(tablePlayerCards)
+--     --tableDump(tablePlayerDecks)
+--     debug("....Scoring.....")
+--     for k, playersCards in pairs(tablePlayerCards) do
+--       local score = 0
+--       for i, card in ipairs(playersCards) do
+--         if card.in_hand then
+--           score = score - card.score
+--         else
+--           score = score + card.score
+--         end
+--       end
+--       for i, card in ipairs(tablePlayerDecks[k]) do
+--         score = score + card.score
+--       end
+--       local name = k
+--       if (Player[k].steam_name) then
+--         name = Player[k].steam_name
+--       end
+--       if (Player[k].seated) then
+--         sOut = sOut .. name .. ": " .. score .. "\n"
+--       end
+--     end
+--   end
+--   textScore.TextTool.setValue(sOut)
+--   bScoreShowing = not bScoreShowing
+-- end
+
+
+function checkNotes()
+  local didOne = false
+  local note = Notes.getNotes()
+  --  note = "adfadsf +100 + 20 - 3 = ## asdfads  1+    40 - 1 =##"
+  --debug("read: " .. note)
+  if ( string.match(note, "##") ) then
+    newNote = ""
+    for line in note:gmatch("([^\n]*\n?)") do
+      newNote = newNote .. CalcNoteLine(line)
+    end
+    Notes.setNotes(newNote)
+  end
+  --  func = assert(load("return " .. formula))
+  --  score= func()
+  --  debug("score: " .. score)
+
+  --  local i = string.match(note, "/# *[%d]* */# *= *[/-/+ %d]*")
+  return 1
+end
+
+function CalcNoteLineOrig(line)
+  note = line
+  local i = string.match(note, "[-/+%d ]* *= *##")
+  if i then
+    didOne = true
+    debug("i = " .. i)
+    debug("gsub1 = " .. string.gsub(i,"( *[-/+%d ]*) *=##","%1" ))
+    local formula = string.gsub(string.gsub(i,"( *[-/+%d ]*) *=##","%1" ),"%s+","")
+--    local formula = string.gsub(string.gsub(i,"( *[-/+%d ]*) *=# *[%d]* *#","%1" ),"%s+","")
+    debug("formula: " .. formula)
+
+    score = calcFormula(formula)
+    --completedFormula = string.gsub(i,"([-/+%d ]* *= *)##","%1"..score.."%2" )
+    completedFormula = string.gsub(i,"([-/+%d ]* *= *)# *[%d]*( *)#","%1"..score.."%2" )
+    --    debug("RESULT = ".. completedFormula)
+  iStart, iEnd = string.find(note, "[-/+%d ]* *= *# *%d* *#")
+    debug("start    = " .. string.sub(note,1,iStart) )
+    debug("compform = " .. completedFormula)
+    debug("end      = " .. string.sub(note,iEnd+1))
+--    note = note .. "\n" .. completedFormula
+    found1 = string.match(note,"(.*=[- %d]*).-=.-")
+    found2 = string.match(note,".*=([- %d]*.-=.*)")
+    if (found1 and found2) then
+      debug("found1= ^" .. found1 .. "^")
+      debug("found1= ^" .. found2 .. "^")
+      note = found1 .. "\n" .. string.gsub(found2,"##",score)
+    else
+      note = string.gsub(note,"##",score)
+  end
+
+    --    note = string.sub(note,1,iStart) .. "\n" .. completedFormula .. string.sub(note,iEnd+1)
+    --    debug("Note: " .. note)
+--    i = string.match(note, "[-/+%d ]* *= *# *[%d]* *#")
+  end
+  return note
+end
+
+function CalcNoteLine(line)
+  note = line
+
+  --log("note = " .. note)
+  local iSolveHere, _ = string.find(note, "##")
+  if (iSolveHere) then
+    --log ("iSolveHere = " .. iSolveHere)
+    local iPos = iSolveHere-1
+    local iEndPos = iPos
+
+    -- work back to the equal sign to get the end of the formula
+    while iPos > 0 do
+      if (string.match(string.sub(note,iPos,iPos),"=") ) then
+        --log("Checking char for = " .. iPos .. " : '" .. string.sub(note,iPos,iPos) .. "''" )
+        iEndPos = iPos - 1
+        break
+      end
+      iPos = iPos - 1
+    end
+
+    -- work back to the non num,+,-, or space to get the start of the formula
+    local sLastNonFormulaChar = ""
+    iPos=iEndPos-1
+    while iPos > 0 do
+      --log("Checking char for +-d " .. iPos .. " : '" .. string.sub(note,iPos,iPos).. "''" )
+      if (not string.match(string.sub(note,iPos,iPos),"[ %+%-%d]") ) then
+        sLastNonFormulaChar = string.sub(note,iPos,iPos)
+        iPos = iPos + 1
+        break
+      end
+      iPos = iPos - 1
+    end
+    local iStartPos = iPos
+
+    --log("StartPos = "..iStartPos)
+    --log("EndPos   = "..iEndPos)
+    local formula = string.sub(note,iStartPos, iEndPos)
+    formula = string.gsub(formula," ","")
+    --log ("formula = " .. formula)
+    score = calcFormula(formula)
+    if sLastNonFormulaChar == "=" then
+
+      -- work forward from startpos to the non num non space to get the last sum
+      iPos=iStartPos
+      local bHitDig = false
+      while iPos < #note do
+        --log("Checking char for +-d " .. iPos .. " : '" .. string.sub(note,iPos,iPos).. "''" )
+        local char = string.sub(note,iPos,iPos)
+        if ((char=="-" and not bHitDig) or (char=="+" and not bHitDig) or (char==" ")) then
+          iPos = iPos + 1
+        elseif (string.match(char,"%d")) then
+          bHitDig=true
+          iPos = iPos +1
+        else
+          iPos = iPos -1
+          break
+        end
+      end
+
+      local sLastSub = string.sub(note,iStartPos,iPos)
+
+      note =  string.sub(note,1,iPos) .. "\n\r" .. string.gsub(formula,"([%+%-])"," %1 ") .. " = " .. score .. string.sub(note,iSolveHere+2,#note)
+    else
+      note =  string.sub(note,1,iSolveHere-1) .. score .. string.sub(note,iSolveHere+2,#note)
+    end
+  end
+  return note
+end
+
+
+
+
+function shallowCopy(orig)
+    local orig_type = type(orig)
+    local copy
+    if orig_type == 'table' then
+        copy = {}
+        for orig_key, orig_value in pairs(orig) do
+            copy[orig_key] = orig_value
+        end
+    else -- number, string, boolean, etc
+        copy = orig
+    end
+    return copy
+end
+--function findByName()
+--  debug("[b]---Find By Name---[/b]")
+--  local allObjects = getAllObjects()
+--  for _, object in ipairs(allObjects) do
+--    debug("got: " .. object.name)
+--    debug("getName(): " .. object.getName())
+--    debug("getName(): " .. object.getName())
+--    debug("typeof(): " .. typeof(object))
+--  end
+
+--end
+
+function findProximity(targetPos, object)
+    local objectPos = object.getPosition()
+    local xDistance = math.abs(targetPos.x - objectPos.x)
+    local zDistance = math.abs(targetPos.z - objectPos.z)
+    local distance = xDistance^2 + zDistance^2
+    return distance  -- return math.sqrt(distance) for actual distance
+end
+
+
+
+function cardDeets(oneCard)
+  local shortSuit
+  local shortName
+  if type(oneCard) == 'table' then
+    shortSuit = string.match(oneCard.description,"[%a%d]*$")
+    shortName = string.match(oneCard.description,"[%a%d]*")
+  else
+    shortSuit = string.match(oneCard.getDescription(),"[%a%d]*$")
+    shortName = string.match(oneCard.getDescription(),"[%a%d]*")
+  end
+  if (shortName == '2' or shortName == 'Joker') then
+    return "Wild", shortName, shortSuit
+  elseif (shortSuit == 'Clubs' or shortSuit == 'Spades') then
+    return "Black", shortName, shortSuit
+  else
+    return "Red", shortName, shortSuit
+  end
+end
+
+function tablepush(tab, el)
+  debug("table push " .. el, "discard")
+  local i = tablefind(tab, el)
+  if i==-1  then
+    table.insert(tab, el)
+  end
+end
+
+function tablepop(tab, el)
+  local i = tablefind(tab, el)
+  if (i>-1) then
+    table.remove(tab,i)
+    debug("table pop-t " .. el, "discard")
+    return true
+  end
+  debug("table pop-f " .. el, "discard")
+return false
+end
+
+
+function tablefind(tab,el)
+  for index, value in pairs(tab) do
+    if value == el then
+      return index
+    end
+  end
+  return -1
+end
+
+
+
+function rnd(x) return math.floor(100*(x+0.005))/100 end
+
+
+function notNill(thing)
+  if thing then
+    return "True"
+  else
+    return "False"
+  end
+end
+
+
+-- =============================================================================
+function changeRelativePosition(vOrigPos, vRot, bLeftRight)
+  local vNewPos = vOrigPos
+  debug("vOrigPos =       " .. dump(vOrigPos), "spread")
+  if (not bLeftRight) then
+    vNewPos.x = vNewPos.x + gfSpreadMult*math.sin(math.rad(vRot.y))
+    vNewPos.z = vNewPos.z + gfSpreadMult*math.cos(math.rad(vRot.y))
+  else -- this is the norm.. fwd/bkwd
+    vNewPos.x = vNewPos.x + gfSpreadMult*math.cos(math.rad(vRot.y))
+    vNewPos.z = vNewPos.z + gfSpreadMult*math.sin(math.rad(vRot.y))
+  end
+  debug("new pos = " .. dump(vNewPos), "spread")
+  return vNewPos
+end
+-- =============================================================================
+function getPlayerRotationFromObject(oObj)
+  local vRot = oObj.getRotation()
+  vRot.x = 0
+  vRot.z = 0
+  local sSelInZoneColor=getOwnerOfObject(oObj)
+  if (not sSelInZoneColor) then
+    log ("ERROR: Trying to get rotation for owner of " .. oObj.tag .. " " .. oObj.getDescription() .. " returned nil")
+    return vRot, sSelInZoneColor
+  end
+  debug("Sampled card belongs to " .. nvl(sSelInZoneColor), "playerrot")
+  -- Now let's just be sure that we're exactly on a right angle
+  -- rotation, in case the hand zone is sligthly off.
+  -- let's add 45 degrees and divide it by 90
+  --  so 0deg = floor(45/90) = 0... times 90 = 0
+  --  so 89.9 deg = floor((89.9+45)/90) = 1.. times 90 = 90
+  --  so 185 deg = floor((185+45)/90) = 2.. times 90 = 180
+  --  so 270 deg = floor((270+45)/90) = 3.. times 90 = 270
+  --  so 360 deg = floor((360+45)/90) = 4.. times 90 = 360
+  -- Then we mod360 it, just in case it came in at 450 somehow (not possible, I expect)
+  local rotPlayerY = obj_Zone[sSelInZoneColor].getRotation().y
+  vRot.y = 90*( math.floor((rotPlayerY+45)/90))
+  vRot.y = (vRot.y)%360
+  debug("... Their hand rot is = " .. obj_Zone[sSelInZoneColor].getRotation().y, "playerrot")
+  debug("... Normalized to = " .. vRot.y, "playerrot")
+  return vRot, sSelInZoneColor
+end
+-- =============================================================================
+function getOwnerOfObject(oObj)
+  -- given an object, find the first scorezone that it belongs to
+  -- (it might belong to >1, but we're just gonna get the first)
+  -- and return the color associated to that score zones
+  -- returns nil if it is not found
+  debug("Getting Owner of " .. oObj.getDescription(),"getowner")
+  local sColor = nil
+  for _, oSelZone in pairs(oObj.getZones()) do
+    debug("Object is in zone " .. oSelZone.guid, "getowner" )
+    for k, oScoreZone in pairs(getAllScoreZones()) do
+      debug("checking against scorezone " .. oScoreZone.guid, "getowner" )
+      if oSelZone.guid == oScoreZone.guid then
+        debug("Hit!  color=" .. oScoreZone.color, "getowner" )
+        return oScoreZone.color
+      end
+    end
+  end
+  return nil
+end
+-- =============================================================================
+function spread4(player, desiredPos, tCards)
+  if not playerStuff[player].bSpreading then
+    playerStuff[player].bSpreading = true
+    local spinMult = 0.75
+    local dropHeight = 0.4
+    local deckType = "Unknown"
+    local lastShortName = ""
+    local spinnableCards={Red = nil, Black = nil, Wild=nil}
+    local cardCount = 0
+    local cardDropped = false
+    local logcnt = 0
+    local takenCard = nil
+    local rot90 = {}
+    local playedCards = {}
+    local cardType = nil
+    local vTopDropSpot = nil
+    local iNumWild = 0
+    local tOrder = { Black={"Wild","Red","Black"},
+                      Red={"Wild","Black","Red"},
+                      Wild={"Red","Black","Wild"}
+                    }
+
+    local pos = {}
+    local posLast = {}
+    local posFirst = {}
+
+    -- ---------------------------------------------------------------
+    function advancePosition()
+      debug("posLast =       " .. dump(posLast), "spread")
+      pos = posLast
+      pos = changeRelativePosition(pos, rot, false)
+      pos.y = pos.y + dropHeight+#playedCards*0.02
+      posLast = pos
+      debug("new posLast =   " .. dump(posLast), "spread")
+      debug("Advanced Pos to " .. dump(pos), "spread")
+    end
+    -- ---------------------------------------------------------------
+    function processOneCard(item)
+      cardCount = cardCount + 1
+      shortColor, shortName, _ = cardDeets(item)
+      if (shortColor=="Wild") then
+        iNumWild=iNumWild+1
+      end
+
+      -- ---------------------------------------------------------------
+      -- if the current card isn't wild, let's see about marking the
+      -- spread with a specific cardtype
+      if (shortColor != "Wild")  then
+        if (not cardType) then
+          cardType = shortName
+        elseif cardType != "MIXED" and cardType != shortName then
+          -- just in case.. if we don't already know it's a mixed set
+          -- AND this card value doesn't match the spread's card type and
+          -- it isn't a wild card, we have a mixed spread.  Let's
+          -- dump out a warning and mark it as mixed.
+          print ("Problem: " .. shortName .. " found in line of " .. cardType)
+          cardType = "MIXED"
+        end
+      end
+
+      -- if it's spinnable, then save it and don't mark it as having
+      -- been dropped (since it's gonna get moved)
+      if not spinnableCards[shortColor] then
+        spinnableCards[shortColor]=item
+        debug("setting spinnable3 " .. shortColor .. " / " .. item.getDescription(),"spread")
+      else
+        -- let's record that we're playing this card (as a core/non-spinnable card)
+        table.insert(playedCards,item)
+
+        item.setRotation(rot)
+        if (cardDropped) then
+          advancePosition()
+        end
+        debug("simple card positioning " .. item.getDescription() .. " at pos="..dump(pos),"spread")
+        item.setPositionSmooth(pos,false,true)
+        debug("setting " .. item.GetDescription() .. " at " .. dump(item.getPosition()),"layoutsel")
+        cardDropped = true
+      end
+    end
+    -- ---------------------------------------------------------------
+
+
+    debug("Spreading--------------","spread")
+
+    -- if it's CA rules, there can be a wild book.  But if not, then mark it as
+    -- N/A. This will help reduce lots of if/then's later in this function
+    -- if (giRuleSet==giCaliforniaRules) then
+    --   spinnableCards["Wild"]="N/A"
+    -- end
+
+    -- get selected objects (or the cards sent in) and call it "the selection (sel)"
+    if (not tCards) then
+      tCards = Player[player].getSelectedObjects()
+    end
+
+    -- If the selection contains a non-deck, non-card thing, just stop entirely
+    -- otherwise we'll end up laying out the table or something
+    for k, v in pairs(tCards) do
+      if (v.tag!="Deck" and v.tag!="Card") then
+        broadcastToColor("Trying to layout a selection containing a non-Deck/Card (".. v.tag.."). Let's not. It goes badly.",player);
+        return
+      end
+    end
+
+    -- if we have something to do...
+    if (tCards and #tCards>0) then
+
+      -- Sort the cards to find the one closest to the center of the table (0,0,0)
+      table.sort(tCards, function(a,b) return findProximity({x=0,y=0,z=0},a) < findProximity({x=0,y=0,z=0},b) end)
+
+      -- take the position of the first card (nearest to table center) and make it
+      -- the start of the stack by capturing its position\
+      posLast = tCards[1].getPosition()
+
+      -- if, instead, we were told where to put it, let's use that.
+      -- this really means the sort and posLast=getpos above were useless
+      -- good programming says to avoid them as unnecessary.  I'm not
+      -- a good programmer
+      if (desiredPos) then
+        posLast = desiredPos
+      end
+
+      -- Figure out the rotation to use for most of the cards
+      -- as a baseline, let's start with the rotation of the first
+      -- card in the set
+      rot = tCards[1].getRotation()
+
+      -- Find out whose zone it's in.  Take the first selection as the
+      -- deciding factor
+      rot = getPlayerRotationFromObject(tCards[1])
+      -- if (false) then
+      --   local sSelInZoneColor=getOwnerOfObject(tCards[1])
+      --   debug("Sampled card belongs to " .. nvl(sSelInZoneColor), "spread")
+      --
+      --   -- Now let's just be sure that we're exactly on a right angle
+      --   -- rotation, in case the hand zone is sligthly off.
+      --   -- let's add 45 degrees and divide it by 90
+      --   --  so 0deg = floor(45/90) = 0... times 90 = 0
+      --   --  so 89.9 deg = floor((89.9+45)/90) = 1.. times 90 = 90
+      --   --  so 185 deg = floor((185+45)/90) = 2.. times 90 = 180
+      --   --  so 270 deg = floor((270+45)/90) = 3.. times 90 = 270
+      --   --  so 360 deg = floor((360+45)/90) = 4.. times 90 = 360
+      --   -- Then we mod360 it, just in case it came in at 450 somehow (not possible, I expect)
+      --   local rotPlayerY = obj_Zone[sSelInZoneColor].getRotation().y
+      --   rot.y = 90*( math.floor((rotPlayerY+45)/90))
+      --   rot.y = (rot.y)%360
+      --   debug("... Their hand rot is = " .. obj_Zone[sSelInZoneColor].getRotation().y, "spread")
+      --   debug("... Normalized to = " .. rot.y, "spread")
+      -- end
+      -- Got the new Rotation
+
+      if (desiredPos) then
+        -- debug("have desired pos.. shifting by fDropshift","spread")
+        -- debug("orig posLast = "..dump(posLast),"spread")
+        -- -- Now, figure out the new posLast/first based on the rotation and such
+        -- -- only if the deisredPos was set.. meaning we're dropping at a pointer
+        -- local vCardSize = tCards[1].getBoundsNormalized()
+        -- local fDropshift = vCardSize.size.z/3
+        -- local fDeltaX = gfDropShift*math.sin(math.rad(rot.y))
+        -- local fDeltaZ = gfDropShift*math.cos(math.rad(rot.y))
+        --
+        -- posLast.x = posLast.x + fDeltaX
+        -- posLast.z = posLast.z + fDeltaZ
+        -- debug("new posLast = "..dump(posLast),"spread")
+      end
+
+      -- If we're going to auto-align, even though we have a target position
+      -- stored in posLast, we need to modify it.
+      -- call NearMe to return a new position after looking for other cards
+      -- to the right and the left (determined by the rot)
+
+      if (playerStuff[player].bAlign>0) then
+        -- as bAlign is negative (false), 1 (high) or 3 (low)
+        -- then subtract 2 making -1 high and 1 low.
+        -- we lose "false" generally, but don't care now, we just checked
+        posLast = nearMe(posLast, rot, tCards, playerStuff[player].bAlign-2)
+      end
+
+      -- We need to keep record of the top spot, even after we've moved
+      -- on to other cards in the spread, so store it.  This is so we can
+      -- return it
+      if (not vTopDropSpot) then
+        vTopDropSpot = shallowCopy(posLast)
+        debug("spread-topdropspot = " .. dump(vTopDropSpot),"layoutsel")
+      end
+
+
+      -- We're going to alternate between a posLast and posFirst so, for now,
+      -- set posFirst = posLast (shallow copy copies the data, not a reference
+      -- to the object.  This is important because the variables will change
+      -- independantly of each other
+      posFirst = shallowCopy(posLast)
+      pos = shallowCopy(posLast)
+
+      -- to be careful, set rot x and z to zero.  we want the card flat
+      -- relative to the table
+      rot.x = 0
+      rot.z = 0
+
+      -- Now let's loop through all the items in the selection and start
+      -- laying out what we can, saving one red, black, and wild off
+      -- to the side to use at the end in case we need to turn a card
+      for i, item in ipairs(tCards) do
+        -- if it's a deck, we're gonna need to go through each contained
+        -- card and handle it
+        if (item.tag == "Deck") then
+          local deckCards = shallowCopy(item.getObjects())
+          for k, oneCard in pairs(deckCards) do
+            if (item.getQuantity()==0) then
+              takenCard = item.remainder
+            else
+              takenCard = item.takeObject({guid=oneCard.guid, position=pos, rotation=rot,smooth=false})
+            end
+            processOneCard(takenCard)
+          end -- end loop through deck cards
+
+        -- CARD INSTEAD
+        else  -- It wasn't a deck, it was a single card..
+          processOneCard(item)
+        end
+      end
+
+      -- Now.. we have all the cards in the selection and they're all individuals
+      -- plus all of them except for 3 possibles are laid out in the right spread
+      -- All that's left is to figure out if we have 1-5, 6, or >0 cards so we can
+      -- know what to do with the 3 "playedCards" (one red, one black and maybe one wild)
+
+      -- if we never said it was a wild deck and never said it was a black deck
+      -- then it isn't unknown anymore, it's red
+      if (giRuleSet==giCaliforniaRules and iNumWild==cardCount) then
+        deckType = "Wild"
+        cardType = "Wild"
+      elseif iNumWild==0 then
+        deckType = "Red"
+      else
+        deckType = "Black"
+      end
+
+      debug("spinnable black = " .. notNill(spinnableCards["Black"]))
+      debug("spinnable red   = " .. notNill(spinnableCards["Red"]))
+      debug("spinnable wild  = " .. notNill(spinnableCards["Wild"]))
+      debug("deck type       = " .. deckType)
+      -- figure out what a 90deg rotation is for is and save it in rot90.y
+      rot90 = shallowCopy(rot)
+      rot90.y = rot90.y + 90
+
+      -- if we have 6 cards and either it's an "almost book", meaning it has both a red and black card
+      -- or it's a wild deck with a spinnable wild card... then we want to lay it out.
+      if (cardCount==6 and (
+                 ( deckType != "Wild" and spinnableCards["Red"] and spinnableCards["Black"])
+              or (deckType == "Wild" and spinnableCards["Wild"]))) then
+
+        for i, sOrder in ipairs(tOrder[deckType]) do
+          if (spinnableCards[sOrder]) then
+            spinnableCards[sOrder].setRotation(iif(i==3, rot90, rot))
+            advancePosition()
+            debug("spinnable positioning " .. spinnableCards[sOrder].getDescription() .. " at pos="..dump(pos),"spread")
+            spinnableCards[sOrder].setPositionSmooth(pos,false,true)
+          end
+        end
+      -- if it's >6, we should see if we can book them (all of them)
+      -- it needs to not be a mixed set of cards (like.. some kings and some 4's)
+      -- and it either must have a red and black card or be a wild book.
+      elseif (cardType != "MIXED" and cardCount>6
+              and ( (spinnableCards["Red"] and spinnableCards["Black"])
+                    or (deckType == "Wild" and spinnableCards["Wild"])) ) then
+          pos = shallowCopy(posFirst)
+          pos.y = pos.y + 0.5
+          for i=1,#playedCards do
+            playedCards[i].setPositionSmooth(pos,false,true)
+            playedCards[i].setRotation(rot90)
+            pos.y = pos.y + .1
+          end
+
+          for i, sOrder in ipairs(tOrder[deckType]) do
+            if (spinnableCards[sOrder]) then
+              pos.y = pos.y + .1
+              debug("spinnable positioning " .. spinnableCards[sOrder].getDescription() .. " at pos="..dump(pos),"spread")
+              spinnableCards[sOrder].setPositionSmooth(pos,false,true)
+              cardDropped = true
+              spinnableCards[sOrder].setRotation(rot90)
+            end
+          end
+
+      -- if we're neither near-bookable 6 cards or stackable 7+ cards, Then
+      -- we just need to plunk all the spinnable cards down at the bottom
+      -- of the spread
+      else
+        for i, sOrder in ipairs(tOrder["Black"]) do
+          if (spinnableCards[sOrder]) then
+            if (cardDropped) then
+              advancePosition()
+            end
+            debug("spinnable positioning " .. spinnableCards[sOrder].getDescription() .. " at pos="..dump(pos),"spread")
+            spinnableCards[sOrder].setPositionSmooth(pos,false,true)
+            cardDropped = true
+            spinnableCards[sOrder].setRotation(rot)
+          end
+        end
+      end
+      Player[player].broadcast(#playedCards .. " cards")
+      debug("cardtype, decktype, cardcount = " .. nvl(cardType) .. ", " .. nvl(deckType) .. ", " .. nvl(cardCount), "prob1")
+    end
+    debug("spread-topdropspot2 = " .. dump(vTopDropSpot),"layoutsel")
+    playerStuff[player].bSpreading=false
+    return vTopDropSpot
+  else
+    debug("Avoided a spread, we were already doing one","spread")
+  end
+  playerStuff[player].bSpreading=false
+end
+
+-- =============================================================================
+
+function spread3(spread, player, rottype, desiredPos, tCards)
+  return spread4(player, desiredPos, tCards)
+end
+
+-- =============================================================================
+function spread3x(spread, player, rottype, desiredPos, tCards)
+  if not playerStuff[player].bSpreading then
+    playerStuff[player].bSpreading = true
+    local spinMult = 0.75
+    local dropHeight = 0.4
+    local deckType = "Unknown"
+    local lastShortName = ""
+    local spinnableCards={Red = nil, Black = nil}
+    local cardCount = 0
+    local cardDropped = false
+    local logcnt = 0
+    local takenCard = nil
+    local rot90 = {}
+    local playedCards = {}
+    local cardType = nil
+    local vTopDropSpot = nil
+    local iNumWild = 0
+
+    debug("Spreading","prob1")
+
+    -- get selected objects (or the cards sent in) and call it "the selection (sel)"
+    local sel
+    if (tCards) then
+      sel = tCards
+    else
+      sel = Player[player].getSelectedObjects()
+    end
+
+    -- If the selection contains a non-deck, non-card thing, just stop entirely
+    -- otherwise we'll end up laying out the table or something
+    for k, v in pairs(sel) do
+      if (v.tag!="Deck" and v.tag!="Card") then
+        broadcastToColor("Trying to layout a selection containing a non-Deck/Card (".. v.tag.."). Let's not. It goes badly.",player);
+        return
+      end
+    end
+
+    -- if we have something to do...
+    if (sel and #sel>0) then
+
+      -- Sort the cards to find the one closest to the center of the table (0,0,0)
+      table.sort(sel, function(a,b) return findProximity({x=0,y=0,z=0},a) < findProximity({x=0,y=0,z=0},b) end)
+
+      -- take the position of the first card (nearest to table center) and make it
+      -- the start of the stack by capturing its position\
+      local posLast = sel[1].getPosition()
+
+      -- if, instead, we were told where to put it, let's use that.
+      -- this really means the sort and posLast=getpos above were useless
+      -- good programming says to avoid them as unnecessary.  I'm not
+      -- a good programmer
+      if (desiredPos) then
+        posLast = desiredPos
+      end
+
+      -- We're going to alternate between a posLast and posFirst so, for now,
+      -- set posFirst = posLast (shallow copy copies the data, not a reference
+      -- to the object.  This is important because the variables will change
+      -- independantly of each other
+      local posFirst = shallowCopy(posLast)
+
+      -- Figure out the rotation to use for most of the cards
+      -- as a baseline, let's start with the rotation of the first
+      -- card in the set
+      rot = sel[1].getRotation()
+      local rotPlayerY=0
+      -- If the parameter was set for rotating it toward a different player
+      -- then find the player's hand zone, capture the rotation,
+      -- and rotate it 180 degrees from there
+      if (rottype == 1) then
+        rotPlayerY = Player[player].getHandTransform().rotation.y
+        rot.y = (rotPlayerY+180)%360
+      else
+        debug("rot.y = " .. rot.y,"spread")
+        closestDist=-1
+        closestColor=""
+        for _, player in ipairs(Player.getPlayers()) do
+  --        if (player.seated) then
+            if obj_Zone[player.color] then
+              prox = findProximity(obj_Zone[player.color].getPosition(), sel[1])
+              if (prox<closestDist or closestDist==-1) then
+                closestDist=prox
+                closestColor=player.color
+              end
+            end
+  --        end
+        end
+        if (closestDist==-1) then
+          log('No player was closest?  none seated? This should never happen.')
+        end
+        debug("Closest is " .. closestColor)
+        debug("zoneRot = " .. obj_Zone[closestColor].getRotation().y)
+        rotPlayerY = obj_Zone[closestColor].getRotation().y
+        rot.y = 90*( math.floor((rotPlayerY+45)/90))
+        rot.y = (rot.y)%360
+      end
+      debug("new rot.y = " .. rot.y,"spread")
+      -- Got the new Rotation
+
+      if (desiredPos) then
+        -- Now, figure out the new posLast/first based on the rotation and such
+        -- only if the deisredPos was set.. meaning we're dropping at a pointer
+        local vCardSize = sel[1].getBoundsNormalized()
+        local fDropshift = vCardSize.size.z/3
+        local fDeltaX = fDropshift*math.sin(math.rad(rot.y))
+        local fDeltaZ = fDropshift*math.cos(math.rad(rot.y))
+
+        posLast.x = posLast.x + fDeltaX
+        posLast.z = posLast.z + fDeltaZ
+      end
+-- ABCD
+      if (playerStuff[player].bAlign>0) then
+        -- as bAlign is negative (false), 1 (high) or 3 (low)
+        -- then subtract 2 making -1 high and 1 low.
+        -- we lose "false" generally, but don't care now, we just checked
+        posLast = nearMe(posLast, rot, sel,playerStuff[player].bAlign-2)
+      end
+
+      if (not vTopDropSpot) then
+        vTopDropSpot = shallowCopy(posLast)
+        debug("spread-topdropspot = " .. dump(vTopDropSpot),"layoutsel")
+      end
+
+      rot.x = 0
+      rot.z = 0
+      for i=1,#sel do
+        local item=sel[i]
+
+        if (item.tag == "Deck") then
+          local deckCards = shallowCopy(item.getObjects())
+          for k, oneCard in pairs(deckCards) do
+            cardCount = cardCount + 1
+
+            shortColor, shortName, _ = cardDeets(oneCard)
+            if (shortColor=="Wild") then
+              iNumWild=iNumWild+1
+            end
+            if (giRuleSet == giCaliforniaRules) then
+              if (not cardType) then
+                if (shortColor == "Wild") then
+--                  cardType = shortColor
+                else
+                  cardType = shortName
+                end
+              elseif cardType != "MIXED" and cardType != shortName and shortColor != "Wild" then
+                print ("Problem: " .. shortName .. " found in line of " .. cardType)
+                cardType = "MIXED"
+              end
+            else
+              if (shortColor != "Wild")  then
+                if (not cardType) then
+                  cardType = shortName
+                elseif cardType != "MIXED" and cardType != shortName then
+                  print ("Problem: " .. shortName .. " found in line of " .. cardType)
+                  cardType = "MIXED"
+                end
+              end
+            end
+
+            -- Set the position for this card to be the same as the one before it
+            pos = posLast
+            -- if the LAST one was not spinnable and was dropped, then slide
+            -- this one down a little bit to let the numbers show and set that as the
+            -- position to be looked at next time around (posLast)
+            if (not bSpinnable and cardDropped) then
+              pos.x = pos.x + gfSpreadMult*math.sin(math.rad(rot.y))
+              pos.z = pos.z + gfSpreadMult*math.cos(math.rad(rot.y))
+              pos.y = pos.y + dropHeight
+              posLast=pos
+            end
+
+            bSpinnable = false
+            if (shortColor != "Wild" or giRuleSet == giCaliforniaRules) and spinnableCards[shortColor]==nil then
+                bSpinnable=true
+                pos.y = pos.y + 2
+            end
+
+            -- if this card is the last in a stack use remainder to get it
+            -- and set its position
+            -- if it's pulled from a stack, you have to use takeobject
+            if (item.getQuantity()==0) then
+              takenCard = item.remainder
+              takenCard.setPositionSmooth(pos,false,true)
+              takenCard.setRotation(rot)
+            else
+              takenCard = item.takeObject({guid=oneCard.guid, position=pos, rotation=rot,smooth=false})
+            end
+
+    --        log (" tc  ..." .. takenCard.getDescription())
+            takenCard.addToPlayerSelection(player)
+            takenCard.addToPlayerSelection(player)
+            table.insert(playedCards,takenCard)
+
+
+            if (shortColor=="Wild" and giRuleSet==giCaliforniaRules) then
+            --  cardDropped = true
+              if spinnableCards[shortColor]==nil then
+                spinnableCards[shortColor]=takenCard
+                debug("setting spinnable1 " .. shortColor)
+              else
+                cardDropped = true
+              end
+            elseif (shortColor == "Wild") then
+              cardDropped = true
+            else
+              if spinnableCards[shortColor]==nil then
+                spinnableCards[shortColor]=takenCard
+                debug("setting spinnable2 " .. shortColor)
+              else
+                cardDropped = true
+              end
+            end
+          end
+        else  -- It wasn't a deck, it was a single card..
+          cardCount = cardCount + 1
+          table.insert(playedCards,sel[i])
+          shortColor, shortName, _ = cardDeets(sel[i])
+          if (shortColor=="Wild") then
+            iNumWild=iNumWild+1
+          end
+          if (giRuleSet == giCaliforniaRules) then
+            if (not cardType) then
+              if (shortColor == "Wild") then
+--                cardType = shortColor
+              else
+                cardType = shortName
+              end
+            elseif cardType != "MIXED" and cardType != shortName and shortColor != "Wild" then
+              print ("Problem: " .. shortName .. " found in line of " .. cardType)
+              cardType = "MIXED"
+            end
+          else
+            if (shortColor != "Wild")  then
+              if (not cardType) then
+                cardType = shortName
+              elseif cardType != "MIXED" and cardType != shortName then
+                print ("Problem: " .. shortName .. " found in line of " .. cardType)
+                cardType = "MIXED"
+              end
+            end
+          end
+
+
+          if ((shortColor == "Black" or shortColor=="Red" or (shortColor=="Wild" and giRuleSet==giCaliforniaRules)) and spinnableCards[shortColor]==nil) then
+            spinnableCards[shortColor]=sel[i]
+            debug("setting spinnable3 " .. shortColor)
+          else
+
+
+            sel[i].setRotation(rot)
+            pos = posLast
+            if (cardDropped) then
+              pos.x = pos.x + gfSpreadMult*math.sin(math.rad(rot.y))
+              pos.z = pos.z + gfSpreadMult*math.cos(math.rad(rot.y))
+              pos.y = pos.y + dropHeight
+            end
+            posLast = pos
+            sel[i].setPositionSmooth(pos,false,true)
+            debug("setting " .. sel[i].GetDescription() .. " at " .. dump(sel[i].getPosition()),"layoutsel")
+            cardDropped = true
+          end
+        end
+      end
+      -- if we never said it was a wild deck and never said it was a black deck
+      -- then it isn't unknown anymore, it's red
+
+      if (giRuleSet==giCaliforniaRules and iNumWild==#playedCards) then
+        deckType = "Wild"
+        cardType="Wild"
+      elseif iNumWild==0 then
+        deckType = "Red"
+      else
+        deckType = "Black"
+      end
+
+      debug("spinnable black = " .. notNill(spinnableCards["Black"]))
+      debug("spinnable red   = " .. notNill(spinnableCards["Red"]))
+      debug("spinnable wild  = " .. notNill(spinnableCards["Wild"]))
+      debug("deck type       = " .. deckType)
+      rot90 = shallowCopy(rot)
+      rot90.y = rot90.y + 90
+      if (cardCount==6 and (
+                 ( deckType != "Wild" and spinnableCards["Red"] and spinnableCards["Black"])
+              or (deckType == "Wild" and spinnableCards["Wild"]))) then
+
+        if (deckType=="Black") then
+          -- It's a black deck, so drop the spinnable Red first
+          -- Then do the Black.
+          spinnableCards["Red"].setRotation(rot)
+          pos = posLast
+          if (cardDropped) then
+            pos.x = pos.x + gfSpreadMult*math.sin(math.rad(rot.y))
+            pos.z = pos.z + gfSpreadMult*math.cos(math.rad(rot.y))
+            pos.y = pos.y + dropHeight
+          end
+    --      log("Dropping spinnable Red" .. ' ('.. rnd(pos.x) .. ',' .. rnd(pos.y) .. ')')
+          posLast = pos
+          spinnableCards["Red"].setPositionSmooth(pos,false,true)
+          cardDropped = true
+          pos = posLast
+          if (cardDropped) then
+            pos.x = pos.x + spinMult*math.sin(math.rad(rot.y))
+            pos.z = pos.z + spinMult*math.cos(math.rad(rot.y))
+            pos.y = pos.y + dropHeight
+          end
+    --      log("spinning Black" .. ' ('.. rnd(pos.x) .. ',' .. rnd(pos.y) .. ')')
+          posLast = pos
+    --    If there was a wild stored as spinnable (in Cali rules, it would be), let's drop that one tooltip
+          if ( spinnableCards["Wild"] ) then
+            spinnableCards["Wild"].setRotation(rot)
+            -- pos = posLast
+            -- if (cardDropped) then
+            --   pos.x = pos.x + gfSpreadMult*math.sin(math.rad(rot.y))
+            --   pos.z = pos.z + gfSpreadMult*math.cos(math.rad(rot.y))
+            --   pos.y = pos.y + dropHeight
+            -- end
+            --      log("Dropping spinnable Red" .. ' ('.. rnd(pos.x) .. ',' .. rnd(pos.y) .. ')')
+            posLast = pos
+            spinnableCards["Wild"].setPositionSmooth(pos,false,true)
+            cardDropped = true
+            pos = posLast
+            if (cardDropped) then
+              pos.x = pos.x + spinMult*math.sin(math.rad(rot.y))
+              pos.z = pos.z + spinMult*math.cos(math.rad(rot.y))
+              pos.y = pos.y + dropHeight
+            end
+            posLast = pos
+          end
+          spinnableCards["Black"].setPositionSmooth(pos,false,true)
+          spinnableCards["Black"].setRotation(rot90)
+          cardDropped = true
+        elseif (deckType == "Red") then
+          -- if it's a red deck, drop the black cards first, then black (there won't be any wilds)
+          spinnableCards["Black"].setRotation(rot)
+          pos = posLast
+          if (cardDropped) then
+            pos.x = pos.x + gfSpreadMult*math.sin(math.rad(rot.y))
+            pos.z = pos.z + gfSpreadMult*math.cos(math.rad(rot.y))
+            pos.y = pos.y + dropHeight
+          end
+    --      log("Dropping spinnable Black" .. ' ('.. pos.x .. ',' .. pos.y .. ')')
+          posLast = pos
+          spinnableCards["Black"].setPositionSmooth(pos,false,true)
+          cardDropped = true
+          spinnableCards["Red"].setRotation(rot)
+          pos = posLast
+          if (cardDropped) then
+            pos.x = pos.x + spinMult*math.sin(math.rad(rot.y))
+            pos.z = pos.z + spinMult*math.cos(math.rad(rot.y))
+            pos.y = pos.y + dropHeight
+          end
+    --      log("spinning Red"  .. ' ('.. pos.x .. ',' .. pos.y .. ')')
+          posLast = pos
+          spinnableCards["Red"].setPositionSmooth(pos,false,true)
+          spinnableCards["Red"].setRotation(rot90)
+          cardDropped = true
+        else -- Deck must be wild (not black, not red)
+          -- thus there's no black or red cards to drop
+          pos = posLast
+          if (cardDropped) then
+            pos.x = pos.x + gfSpreadMult*math.sin(math.rad(rot.y))
+            pos.z = pos.z + gfSpreadMult*math.cos(math.rad(rot.y))
+            pos.y = pos.y + dropHeight
+          end
+          posLast = pos
+          spinnableCards["Wild"].setPositionSmooth(pos,false,true)
+          spinnableCards["Wild"].setRotation(rot90)
+          cardDropped = true
+
+        end
+      elseif (cardType != "MIXED" and cardCount>6 and ( (spinnableCards["Red"] and spinnableCards["Black"]) or (deckType == "Wild" and spinnableCards["Wild"])) )then
+          pos = shallowCopy(posFirst)
+          pos.y = pos.y + 0.5
+          for i=1,#playedCards do
+            playedCards[i].setPositionSmooth(pos,false,true)
+            playedCards[i].setRotation(rot90)
+            pos.y = pos.y + .1
+          end
+          pos.y = pos.y + 1
+          if (deckType=="Black") then
+            spinnableCards["Black"].setPositionSmooth(pos,false,true)
+          elseif (deckType=="Red") then
+            spinnableCards["Red"].setPositionSmooth(pos,false,true)
+          else
+            spinnableCards["Wild"].setPositionSmooth(pos,false,true)
+          end
+      else
+        for _, oneCard in pairs(spinnableCards) do
+          if oneCard then
+            pos = posLast
+            if (cardDropped) then
+              pos.x = pos.x + gfSpreadMult*math.sin(math.rad(rot.y))
+              pos.z = pos.z + gfSpreadMult*math.cos(math.rad(rot.y))
+              pos.y = pos.y + dropHeight
+            end
+            posLast = pos
+            oneCard.setPositionSmooth(pos,false,true)
+            oneCard.setRotation(rot)
+            cardDropped = true
+          end
+        end
+      end
+      Player[player].broadcast(#playedCards .. " cards")
+      debug("cardtype, decktype, cardcount = " .. cardType .. ", " .. deckType .. ", " .. cardCount, "prob1")
+    end
+    debug("spread-topdropspot2 = " .. dump(vTopDropSpot),"layoutsel")
+    playerStuff[player].bSpreading=false
+    return vTopDropSpot
+  else
+    debug("Avoided a spread","prob1")
+  end
+  playerStuff[player].bSpreading=false
+
+end
+
+function addRelativePos(sDir, vPos, vRot, fDelta)
+  local vOut = vPos
+  if (gt_DECODE_DIR[vRot.y][1]=="x") then
+    vOut.z = vOut.z + (fDelta*gt_DECODE_DIR[vRot.y][2])
+  else
+    vOut.x = vOut.x + (fDelta*gt_DECODE_DIR[vRot.y][2])
+  end
+  return vOut
+end
+
+function findLeftMostAndHighest(tOrigSelObjects, vRot)
+  local cDecodeDir = { [0]={"x",-1}, [90]={"z",-1}, [180]={"x",1}, [270]={"z",1} }
+  local sMostLeft = ""
+  local oMostLeft = nil
+  local vMostLeftPos = {} -- {x=0, y=0, z=0}
+  local sHighest = ""
+  local oHighest = nil
+  local vHighestPos = {} -- {x=0, y=0, z=0}
+  for k, v in pairs(tOrigSelObjects) do
+--    debug("checking position of " .. v.getDescription() .. " (" .. dump(v.getPosition()) ..")","layoutsel")
+    if (cDecodeDir[vRot.y][1]=="x") then
+--      debug("checking x " .. v.getPosition().x .. " modified by " ..  cDecodeDir[vRot.y][2],"layoutsel")
+      if ((not oMostLeft) or v.getPosition().x*cDecodeDir[vRot.y][2]<vMostLeftPos.x*cDecodeDir[vRot.y][2]) then
+        sMostLeft = v.getDescription()
+        oMostLeft = v
+        vMostLeftPos = v.getPosition()
+      end
+      if ((not oHighest) or v.getPosition().z*cDecodeDir[vRot.y][2]>vHighestPos.z*cDecodeDir[vRot.y][2]) then
+        sHighest = v.getDescription()
+        oHighest = v
+        vHighestPos = v.getPosition()
+      end
+
+    else
+      -- this should be a <... my 1/-1 in cdecode seems wrong but it's working for the nearMe
+      -- so I'll flip it as a > for now.
+      if ((not oMostLeft) or v.getPosition().z*cDecodeDir[vRot.y][2]>vMostLeftPos.z*cDecodeDir[vRot.y][2]) then
+        sMostLeft = v.getDescription()
+        oMostLeft = v
+        vMostLeftPos = v.getPosition()
+      end
+      if ((not oHighest) or v.getPosition().x*cDecodeDir[vRot.y][2]>vHighestPos.x*cDecodeDir[vRot.y][2]) then
+        sHighest = v.getDescription()
+        oHighest = v
+        vHighestPos = v.getPosition()
+      end
+    end
+  end
+--  debug("Most Left = " .. sMostLeft,"layoutsel")
+--  debug("Highest = " .. sHighest,"layoutsel")
+  return oMostLeft, oHighest
+end
+
+-- function getCardsInMyVertical(oCard, vRot, sColor, tOrigSelObjects)
+--   local fCardPadding = 0.2
+--   -- detect a small rectange, extending to either side the width of a card turned on
+--   -- it's side (so the long side, plus the padding between cards,plus a tiny bit more to hit the card
+--   local detectorSize = { gv_CARD_SIZE.z*.75, 1, gv_CARD_SIZE.x*5}
+--   local t = {
+--     ["origin"] = oCard.getPosition(),
+--     ["direction"] = {0,1,0},
+--     ["type"] = 3, -- box
+--     ["size"] = detectorSize,
+--     ["orientation"] = {vRot.x, vRot.y, vRot.z},
+--     ["distance"] = .02,
+--     ["debug"] = gbDevGhostBoxes, -- make it visible for Now
+--   }
+--   local objs = Physics.cast(t)
+--   local alreadyCheckedGUIDs = {}
+--   local tSelectionToSpread = {}
+--   for k, v in pairs(objs) do
+--     if ((v.hit_object.tag=="Card" or v.hit_object.tag=="Deck") and not alreadyCheckedGUIDs[v.hit_object.getGUID()] ) then
+--       alreadyCheckedGUIDs[v.hit_object.getGUID()]=1
+--       if (objectInScoreZone(v.hit_object, sColor)) then
+--         if (findInTable(tOrigSelObjects,v.hit_object)>-1) then
+--           table.insert(tSelectionToSpread,v.hit_object)
+--         else
+--           debug("v.hit_object: " .. v.hit_object.getDescription() .. " not in original set, so ignoring it", "layoutsel")
+--         end
+--       end
+--     end
+--   end
+--   return tSelectionToSpread
+-- end
+
+function getCardsInMyVertical2(oCard, vRot, sColor, tOrigSelObjects, vPos)
+  local bFoundDifferentCard = false
+  local alreadyCheckedGUIDs = {}
+  local tSelectionToSpread = {}
+  local fCardPadding = 0.2
+  -- detect a small rectange, extending to either side the width of a card turned on
+  -- it's side (so the long side, plus the padding between cards,plus a tiny bit more to hit the card
+  local detectorSize = { gv_CARD_SIZE.z*.75, 2.0, gv_CARD_SIZE.x/10}
+
+  vRot, sColor = getPlayerRotationFromObject(oCard)
+
+
+  local aDir = {}
+  if gt_DECODE_DIR[vRot.y][1]=="x" then
+    aDir[1] = {0,0,-1}
+    aDir[2] = {0,0,1}
+  else
+    aDir[1] = {-1,0,0}
+    aDir[2] = {1,0,0}
+  end
+
+  if (not vPos) then
+    vPos = oCard.getPosition()
+  end
+  local firstNonWild = nil
+  for _, vDir in pairs(aDir) do
+    local t = {
+      ["origin"] = vPos,
+      ["direction"] = vDir,
+      ["type"] = 3, -- box
+      ["size"] = detectorSize,
+      ["orientation"] = {vRot.x, vRot.y, vRot.z},
+      ["max_distance"] = gv_CARD_SIZE.x*2.5,
+      ["debug"] = gbDevGhostBoxes, -- make it visible for Now
+    }
+    local objs = Physics.cast(t)
+    local sType, sName, sSuit = cardDeets(oCard)
+    if (sType != "Wild") then
+      firstNonWild = sName .. iif(sName=="3",sType,"")
+    end
+    for k, v in pairs(objs) do
+      if ((v.hit_object.tag=="Card" or v.hit_object.tag=="Deck") and not alreadyCheckedGUIDs[v.hit_object.getGUID()] ) then
+        alreadyCheckedGUIDs[v.hit_object.getGUID()]=1
+        if (objectInScoreZone(v.hit_object, sColor)) then
+          if (not tOrigSelObjects or findInTable(tOrigSelObjects,v.hit_object)>-1) then
+            local sType, sName, sSuit = cardDeets(v.hit_object)
+            if (sType=="Red" and sName=="3") then
+              bFoundDifferentCard = true
+              debug("Found a Red 3. stop","layoutsel")
+              break
+            elseif (sType != "Wild" and firstNonWild and firstNonWild != sName .. iif(sName=="3",sType,"")) then
+              bFoundDifferentCard = true
+              debug("Found Different Card = true","layoutsel")
+              break
+            elseif ((sType != "Wild") and (not firstNonWild) ) then
+              firstNonWild = sName .. iif(sName=="3",sType,"")
+            end
+            debug(firstNonWild,"layoutsel")
+            if (firstNonWild) then
+              debug("Added " .. v.hit_object.getDescription() .. " while firstNonWild=".. firstNonWild .. " sName="..sName .. iif(sName=="3",sType,""),"layoutsel")
+            end
+            table.insert(tSelectionToSpread,v.hit_object)
+          else
+            debug("v.hit_object: " .. v.hit_object.getDescription() .. " not in original set, so ignoring it", "layoutsel")
+          end
+        end
+      end
+    end
+  end
+  return tSelectionToSpread, bFoundDifferentCard
+end
+
+
+function nvl(val, ifnil)
+  if (val) then
+    return val
+  else
+    if (ifnil) then
+      return ifnil
+    else
+      return "nil"
+    end
+  end
+end
+
+function objectInScoreZone(oThing, sColor)
+--  debug("giPC=" .. giPlayerCount .. " - sColor=" .. nvl(sColor), "layoutsel")
+--  debug("checking " .. #objScoreZones[giPlayerCount]["Colors"][sColor].zones .. " zones", "layoutsel")
+--  debug(dump(objScoreZones[giPlayerCount]["Colors"][sColor].zones), "layoutsel")
+--  debug("ABC: " .. dump(objScoreZones[giPlayerCount]["Colors"][sColor].zones[1].obj.getGUID()), "layoutsel")
+  for _, scoreZone in ipairs(objScoreZones[giPlayerCount]["Colors"][sColor].zones) do
+    if (objectInZone(oThing,scoreZone.obj)) then
+      return true
+    end
+  end
+  return false
+end
+--==============================================================================
+function getAllScoreZones()
+  local tOut={}
+  debug("getting all score zones","getallscorezones")
+  for sColor, scoreZones in pairs(objScoreZones[giPlayerCount]["Colors"]) do
+    debug("looping through " .. #scoreZones.zones .. " zones for " .. sColor,"getallscorezones")
+    for _, scoreZone in ipairs(scoreZones.zones) do
+      debug("adding zone " .. scoreZone.obj.getGUID(),"getallscorezones")
+      table.insert(tOut, {color=sColor, guid=scoreZone.obj.getGUID()})
+    end
+  end
+  debug("returning " .. dump(tOut),"getallscorezones")
+  return tOut
+end
+
+--==============================================================================
+function layoutLargeSelection(sColor, vRot)
+  -- directions based on the rotation of the hand object
+
+  debug("layoutLargeSelection:","layoutsel")
+  --debug("vrot = " .. dump(vRot),"layoutsel")
+  local tOrigSelObjects = Player[sColor].getSelectedObjects()
+
+  -- Check that we have SOMETHING to do
+  if (not tOrigSelObjects or #tOrigSelObjects==0) then
+    broadcastToColor("No items are selected.  Layout Canceled", sColor)
+    return false
+  end
+
+  -- Check that everything is in this players score zone
+  for k, v in pairs(tOrigSelObjects) do
+    if not (objectInScoreZone(v, sColor)) then
+      broadcastToColor("At least 1 of your selection is not in your zone (" .. v.getDescription() .. ").", sColor)
+      broadcastToColor("Layout is not allowed.", sColor)
+      return false
+    end
+  end
+  itmp=30
+  local iLastCount = #Player[sColor].getSelectedObjects() + 1
+  local vNextPos = nil
+  while itmp>0 and (#Player[sColor].getSelectedObjects()>0 and  #Player[sColor].getSelectedObjects()<iLastCount) do
+    debug("Doing LayoutSubSelect.  objCount=" .. #Player[sColor].getSelectedObjects(), "layoutsel")
+    iLastCount = #Player[sColor].getSelectedObjects()
+    vNextPos = layoutSubSelection(sColor, vRot, Player[sColor].getSelectedObjects(), vNextPos)
+    debug("nextpos = " .. dump(vNextPos), "layoutsel")
+    itmp = itmp -1
+  end
+  if itmp==0 then
+    log ("Had to crash out!!!!!!!!!!!!!!!!!!!!")
+  end
+  for k, v in pairs(tOrigSelObjects) do
+    v.addToPlayerSelection(sColor)
+  end
+
+end
+--==============================================================================
+function layoutVerticalStack(sColor, vRot, oTarget, vDesiredPos)
+  if (vDesiredPos) then
+    debug("vDesirePos = " .. dump(vDesiredPos),"layoutsel")
+  end
+    -- Do the bulk of it.  First, find the left most and the highest
+
+
+  -- Now find everything around it vertically
+  local tCards = getCardsInMyVertical2(oTarget, vRot, sColor, nil)
+--  debug ("tCards = " .. dump(tCards), "layoutsel")
+  local oLeftMost, oHighest = findLeftMostAndHighest(tCards, vRot)
+--  debug ("oLeftMost = " .. oLeftMost.getDescription(),"layoutsel")
+--  debug ("oHighest = " .. oHighest.getDescription(),"layoutsel")
+
+  if (not vDesiredPos) then
+    if (gt_DECODE_DIR[vRot.y][1]=="x") then
+      vDesiredPos = {x=oLeftMost.getPosition().x, y=oLeftMost.getPosition().y, z=oHighest.getPosition().z+oHighest.getScale().x/2}
+    else
+      vDesiredPos = {x=oHighest.getPosition().x+oHighest.getScale().x/2, y=oLeftMost.getPosition().y, z=oLeftMost.getPosition().z}
+    end
+  end
+  vDropTop = spread3("s",sColor, 1, vDesiredPos, tCards)
+  debug("vDropTop = " .. dump(vDropTop),"layoutsel")
+
+    return vNextPos
+end
+
+
+
+
+
+
+--==============================================================================
+function layoutSubSelection(sColor, vRot, tObjects, vDesiredPos)
+  debug("enter layoutSubSelection ","layoutsel")
+  -- Do the bulk of it.  First, find the left most and the highest
+  local oLeftMost, oHighest = findLeftMostAndHighest(tObjects, vRot)
+--  debug ("oLeftMost = " .. oLeftMost.getDescription(),"layoutsel")
+--  debug ("oHighest = " .. oHighest.getDescription(),"layoutsel")
+
+  -- Now find everything around it vertically
+  local tCards = getCardsInMyVertical2(oLeftMost, vRot, sColor, tObjects)
+--  debug ("tCards = " .. dump(tCards), "layoutsel")
+
+  if (not vDesiredPos) then
+    if (gt_DECODE_DIR[vRot.y][1]=="x") then
+--      vDesiredPos = {x=oLeftMost.getPosition().x, y=oLeftMost.getPosition().y, z=oHighest.getPosition().z+oHighest.getScale().x/2}
+      vDesiredPos = {x=oLeftMost.getPosition().x, y=oLeftMost.getPosition().y, z=oHighest.getPosition().z}
+    else
+--      vDesiredPos = {x=oHighest.getPosition().x+oHighest.getScale().x/2, y=oLeftMost.getPosition().y, z=oLeftMost.getPosition().z}
+      vDesiredPos = {x=oHighest.getPosition().x, y=oLeftMost.getPosition().y, z=oLeftMost.getPosition().z}
+    end
+    debug("vDesirePos calculated as to = " .. dump(vDesiredPos),"layoutsel")
+  else
+    debug("vDesirePos passed in as = " .. dump(vDesiredPos),"layoutsel")
+  end
+
+  vDropTop = spread3("s",sColor, 1, vDesiredPos, tCards)
+  debug("spread vDropTop = " .. dump(vDropTop),"layoutsel")
+
+  debug("Direction = " .. gt_DECODE_DIR[vRot.y][1] .. " / " .. gt_DECODE_DIR[vRot.y][2], "layoutsel" )
+  if (gt_DECODE_DIR[vRot.y][1]=="x") then
+  --  vNextPos = {x=vDropTop.x + (gv_CARD_SIZE.x + 0.2)*gt_DECODE_DIR[vRot.y][2] , y=vDropTop.y, z=vDropTop.z+ gv_CARD_SIZE.x/2*gt_DECODE_DIR[vRot.y][2]}--+gv_CARD_SIZE.z/2*gt_DECODE_DIR[vRot.y][2]}
+    vNextPos = {x=vDropTop.x + (gv_CARD_SIZE.x + 0.2)*gt_DECODE_DIR[vRot.y][2] , y=vDropTop.y, z=vDropTop.z}--+gv_CARD_SIZE.z/2*gt_DECODE_DIR[vRot.y][2]}
+  else
+    --vNextPos = {x=vDropTop.x + gv_CARD_SIZE.x/2*gt_DECODE_DIR[vRot.y][2], y=vDropTop.y, z=vDropTop.z - (gv_CARD_SIZE.x + 0.2)*gt_DECODE_DIR[vRot.y][2]}
+    vNextPos = {x=vDropTop.x, y=vDropTop.y, z=vDropTop.z - (gv_CARD_SIZE.x + 0.2)*gt_DECODE_DIR[vRot.y][2]}
+  end
+
+  debug("#tcards="..#tCards,"layoutsel")
+  for k, v in pairs(tCards) do
+    v.removeFromPlayerSelection(sColor)
+  end
+
+  return vNextPos
+end
+
+
+function nearMe(vPos, vRot, sel, iHighLow)
+  -- iHighLow -1 to go high, 1 to go lower
+
+  debug("Called nearMe","nearme")
+
+  local fCardPadding = 0.2
+  local cDecodeDir = { [0]={"x",-1}, [90]={"z",-1}, [180]={"x",1}, [270]={"z",1} }
+  local fHighest = nil
+  local oHighest = nil
+  local fNearest = nil
+  local oNearest = nil
+  local alreadyCheckedGUIDs = {}
+
+  -- if we've been passed a selection of cards, go ahead and ignore them
+  -- they're the ones we're trying to place
+  if (sel) then
+    --    debug("#sel=".. #sel,"nearme")
+    for i, oneSel in ipairs(sel) do
+      debug("doing "..i,"nearme")
+      --debug(sel[i],"nearme")
+      debug(oneSel,"nearme")
+      alreadyCheckedGUIDs[oneSel.getGUID()]=1
+    end
+  end
+
+  -- detect a small rectange, extending to either side the width of a card turned on
+  -- it's side (so the long side, plus the padding between cards,plus a tiny bit more to hit the card
+  local detectorSize = { gv_CARD_SIZE.x*2 + (fCardPadding+0.1)*2, 1,0.5 }
+  local t = {
+    ["origin"] = vPos,
+    ["direction"] = {0,1,0},
+    ["type"] = 3, -- box
+    ["size"] = detectorSize,
+    ["orientation"] = {vRot.x, vRot.y, vRot.z},
+    ["distance"] = .1,
+    ["debug"] = gbDevGhostBoxes, -- make it visible for Now
+  }
+  local objs = Physics.cast(t)
+
+  if (not objs) then
+    debug("No cards left or right of " .. dump(vPos) .."were found.","nearme")
+  end
+
+  --local detectorSize = { gv_CARD_SIZE.x*2 + (fCardPadding+0.1)*2, 1,0.5 }
+  for k, v in pairs(objs) do
+    if (v.hit_object.tag=="Card" and not alreadyCheckedGUIDs[v.hit_object.getGUID()] ) then
+      alreadyCheckedGUIDs[v.hit_object.getGUID()]=1
+      local pos = v.hit_object.getPosition()
+      debug("vry="..vRot.y,"nearme")
+      debug("cdd="..cDecodeDir[vRot.y][1] .. " / " .. cDecodeDir[vRot.y][2],"nearme")
+
+      -- Look to see if the cards we found were the ones that are part of this stack
+      -- meaning that their relative Left/Right position is within 1 unit of the
+      -- ray box itself... so skip those
+      if ( (cDecodeDir[vRot.y][1]=="z" and math.abs(vPos.z-pos.z)>1)
+           or (cDecodeDir[vRot.y][1]=="x" and math.abs(vPos.x-pos.x)>1) ) then
+        --debug("vrot="..dump(vRot),"nearme")
+        --debug("pos="..dump(pos),"nearme")
+        local newOrigin = {  iif(vRot.y==90,pos.x-(detectorSize[1]/4),iif(vRot.y==270,pos.x+(detectorSize[1]/4),pos.x)),
+                        pos.y,
+                        iif(vRot.y==0,pos.z-(detectorSize[1]/4),iif(vRot.y==180,pos.z+(detectorSize[1]/4),pos.z))
+                      }
+        --debug("newOrigin="..dump(newOrigin),"nearme")
+        local s = {
+          ["origin"] = newOrigin,
+          ["direction"] = {0,1,0},
+          ["type"] = 3, -- box
+          ["size"] = detectorSize,
+          ["orientation"] = {vRot.x, vRot.y+90, vRot.z},
+          ["distance"] = .02,
+          ["debug"] = gbDevGhostBoxes, -- make it visible for Now
+        }
+        local stackObjs = Physics.cast(s)
+        local fHighest=nil
+        for kStackCard, vStackCard in pairs(stackObjs) do
+          if (vStackCard.hit_object.tag=="Card") then
+            --debug("in range: " .. vStackCard.hit_object.getDescription(),"nearme")
+            --debug("zpos=".. vStackCard.hit_object.getPosition().z,"nearme")
+            local fRelHeight=iif(cDecodeDir[vRot.y][1]=="x",vStackCard.hit_object.getPosition().z,vStackCard.hit_object.getPosition().x)
+            if (not fHighest or iif(cDecodeDir[vRot.y][2]==1,(fHighest<fRelHeight),(fHighest>fRelHeight))) then
+              fHighest = fRelHeight
+              oHighest = vStackCard.hit_object
+            end
+          end
+        end
+
+        -- we have a stack and have found the highest of it.  Now we check
+        -- that against any other stacks (read: the other side of this particular
+        -- spread may have cards too) to see which is nearest at that is the
+        -- one we'll align to
+        if (not fNearest or
+            iif(cDecodeDir[vRot.y][2]==1*iHighLow,
+                (fNearest<math.abs(fNearest-fHighest)),
+                (fNearest>math.abs(fNearest-fHighest)))) then
+          --debug("setting nearesttotarget to " .. oHighest.getDescription(),"nearme")
+          fNearest = fHighest
+          oNearest = oHighest
+        end
+        debug("Highest == " .. oHighest.getDescription(), "nearme")
+      end
+      if (oNearest) then
+        debug("NearestToTarget="..oNearest.getDescription(),"nearme")
+      end
+    end
+    --    v.hit_object.flip()
+  end
+
+  local cardGap = gv_CARD_SIZE.x + (fCardPadding)
+  -- if we found a nearest... work it out..
+  if oNearest then
+    debug("official nearest = " .. oNearest.getDescription(),"nearme")
+    local posON = oNearest.getPosition()
+    local posNew = posON
+    if (cDecodeDir[vRot.y][1]=="x") then
+      if (vPos.x > posNew.x) then
+        posNew.x = posON.x + cardGap
+      else
+        posNew.x = posON.x - cardGap
+      end
+    else
+      if (vPos.z > posNew.z) then
+        posNew.z = posON.z + cardGap
+      else
+        posNew.z = posON.z - cardGap
+      end
+    end
+    debug("returning new pos: ".. dump(posNew),"nearme")
+    -- if we have a nearest (which is actually the highest of the nearest stack)
+    -- then return a target position based on that object
+    return posNew
+  end
+  -- if we reached here, we didn't have a "nearest" so we'll just say
+  -- drop this thing where you already are (vPos)
+  debug("returning orig pos: ".. dump(vPos),"nearme")
+  return vPos
+end
+
+
+
+
+
+
+function onObjectSpawn(obj)
+    obj.addContextMenuItem('Layout Pretty', function(x) spread3("s",x,1) end, false)
+    obj.addContextMenuItem('Layout TowardCam', function(x) spread3("s",x,0) end, false)
+end
+
+function findInTable2 (tab, target)
+  if (tab) then
+    for i, v in ipairs(tab) do
+      if v.guid==target then
+        return i
+      end
+    end
+  end
+  return -1
+end
+
+function findInTable(tab, target)
+  if (tab) then
+    for i, v in ipairs(tab) do
+      if v==target then
+        return i
+      end
+    end
+  end
+  return -1
+end
+
+function objGuid(obj)
+  if (obj) then
+    --log("leave = " .. obj.tag)
+    if obj.guid then
+      return obj.guid
+    else
+      local g = obj.getGUID()
+      return g
+    end
+  else
+    return nil
+  end
+end
+
+function playerZoneCheck(sColor, oTheObject)
+  if (Player[sColor] and Player[sColor].seated) then
+    playerZoneBoundary(sColor, oTheObject)
+    if (oTheObject.tag=="Card") then
+      queueFootNoteCheck(sColor)
+    end
+  end
+end
+
+function onObjectLeaveScriptingZone(zone, leave_object)
+  if (leave_object.tag=="Deck") then
+    for _, oneCard in ipairs(leave_object.getObjects()) do
+      onObjectLeaveScriptingZone(zone, oneCard)
+    end
+    return
+  end
+  if (zone.guid == ZONE_DISCARD) then
+    local iPos = findInTable(tableDiscard, objGuid(leave_object))
+    if (iPos>-1) then
+     table.remove(tableDiscard,iPos);
+    end
+    debug('Leave script zone ' .. leave_object.guid,"discard")
+    tablepush(fromdiscard, leave_object.guid)
+    Wait.time(function() tablepop(fromdiscard,leave_object.guid) end,2.0,0)
+--    guidJustLeftDiscard = leave_object.guid
+  end
+--  log (leave_object.tag .. " leaving: " .. leave_object.guid)
+
+
+  if (zone.guid == ZONE_WHITE) then
+    playerZoneCheck("White",leave_object)
+  elseif (zone.guid == ZONE_RED) then
+    playerZoneCheck("Red",leave_object)
+  elseif (zone.guid == ZONE_GREEN) then
+    playerZoneCheck("Green",leave_object)
+  elseif (zone.guid == ZONE_BLUE) then
+    playerZoneCheck("Blue",leave_object)
+  end
+end
+
+function queueFootNoteCheck(sColor)
+  if (not gbDealing) then
+    if (not playerStuff[sColor].bQueuedFootNoteCheck) then
+      playerStuff[sColor].bQueuedFootNoteCheck = true
+      Wait.time(function () checkFootNote(sColor); playerStuff[sColor].bQueuedFootNoteCheck=false end,0.5)
+    end
+  end
+end
+
+function announceAll(sMsg)
+--  if not bMaskActions then
+    printToAll(sMsg)
+--  end
+end
+
+function playerZoneBoundary (player_color, obj)
+  if not gbInitializing then
+
+    if not gbDealing then
+      local name = coolName(player_color)
+      if tablepop(fromdeck,obj.guid) then
+        if (not playerStuff[player_color].bMaskActions) then
+          announceAll(name .. " drew 1")
+        end
+      else
+        if tablepop(fromdiscard,obj.guid) then
+          if (not playerStuff[player_color].bMaskActions) then
+            announceAll(name .. " drew 1 (from discard)")
+          end
+        end
+      end
+    end
+
+    -- local lDesc, lGuid, lQty
+    -- if type(obj)=="table" then
+    --   lDesc = obj.description
+    --   lGuid = obj.guid
+    --   lQty = 1
+    -- else
+    --   lDesc = obj.getDescription()
+    --   lGuid = obj.getGUID()
+    --   lQty = obj.getQuantity()
+    -- end
+    -- debug("val=" .. lDesc)
+    -- local iPos = findInTable2(tablePlayerCards[player_color],lGuid)
+    -- if iPos==-1 then
+    --   local iScore, sDesc = scoreTarget(obj)
+    --   --log("Inserting.1." .. obj.getDescription())
+    --   table.insert(tablePlayerCards[player_color], {guid= lGuid, isdeck=(lQty>1), score= iScore, in_hand=true,desc= sDesc})
+    --   giInsertCount = giInsertCount + 1
+    --   debug(giInsertCount .. " zb (" .. lGuid .. ") " .. sDesc)
+    -- else
+    --   tablePlayerCards[player_color][iPos].in_hand = inHand
+    -- end
+    --tableDump(tablePlayerCards)
+  end
+end
+
+function onObjectEnterScriptingZone( zone,  enter_object)
+--end
+--function dummy()
+  if (zone.guid == ZONE_DISCARD) then
+    --local g = enter_object.getGUID()
+    if (enter_object and (enter_object.tag=="Card" or enter_object.tag=="Deck")) then
+      tablepush(fromdiscard, enter_object.guid)
+      table.insert(tableDiscard, enter_object.guid)
+    end
+  end
+  if (zone.guid == ZONE_WHITE) then
+    playerZoneCheck("White", enter_object)
+  elseif (zone.guid == ZONE_RED) then
+    playerZoneCheck("Red", enter_object)
+  elseif (zone.guid == ZONE_GREEN) then
+    playerZoneCheck("Green", enter_object)
+  elseif (zone.guid == ZONE_BLUE) then
+    playerZoneCheck("Blue", enter_object)
+  end
+end
+
+function tableDump(tab)
+  for k, playersCards in pairs(tab) do
+    debug(#playersCards .. " ".. k .. " **********************************")
+    for i, card in ipairs(playersCards) do
+      debug("guid = " .. card.guid .. "  - score= " .. card.score .. "  - inhand=" .. tostring(card.in_hand) .. "  - desc = " .. card.desc)
+    end
+  end
+end
+
+
+function enteredAndWaited(bag, oGuid, oTag, oDesc)
+  return
+end
+-- function hide001 ()
+--   debug("bag: "  .. " - g:" .. bag.getGUID() .. " - d:" .. bag.getDescription())
+-- --  debug("bag: " .. bag.tag       .. " - g:" .. bag.getGUID() .. " - d:" .. bag.getDescription())
+--     debug("obj: " .. oGuid .. " (" .. oTag   ..  ") - "  .. oDesc)
+--     debug("Tock")
+--
+--     local lScore, lDesc = scoreTarget(bag)
+--     debug("Tick")
+--       bag.setDescription(lDesc)
+--
+--       -- If the deck isn't already owned
+--       local sDeckPlayer, iBagPos = findUsedThing(tablePlayerDecks, bag.getGUID())
+--       if (not sDeckPlayer ) then
+--         -- Look for the card in the table of owned cards
+--         debug("Looking for ".. oGuid .. " - d:" .. oDesc)
+--         local sPlayer = findUsedThing(tablePlayerCards, oGuid)
+--         -- Since deck isn't owned, if we found a player for the card add this deck to that player
+--         if (sPlayer) then
+--           debug("card belongs to " .. sPlayer)
+--           debug("Inserting.2." .. bag.getDescription())
+--           table.insert(tablePlayerDecks[sPlayer],{guid=bag.getGUID(), score=lScore, desc=lDesc})
+--         end
+--       else
+--         tablePlayerDecks[sDeckPlayer][iBagPos].score = lScore
+--         tablePlayerDecks[sDeckPlayer][iBagPos].desc = lDesc
+--       end
+--
+--       debug("Decks ----------------")
+--       --tableDump(tablePlayerDecks)
+-- end
+
+function onObjectPickUp(colorName, object)
+    debug(colorName .. " picked up " .. object.getGUID())
+    if tablepop(fromdiscard,object.guid) then
+      local name = colorName
+      if (Player[colorName].steam_name) then
+        name = Player[colorName].steam_name
+      end
+      announceAll(name .. " drew 1 (from discard)")
+    end
+
+end
+
+function onObjectLeaveContainer(bag, obj)
+  debug("Object " .. obj.guid .. " left container " .. bag.guid, "discard")
+  if (objectInZone(obj, obj_Zone_Discard)) then
+    tablepush(fromdiscard,obj.guid)
+    Wait.time(function() tablepop(fromdiscard,obj.guid) end,2.0,0)
+  end
+  if not gbInitializing and mainDeck then
+    -- local player, idx = findUsedThing(tablePlayerDecks, bag.getGUID())
+    --log ("b: " .. bag.guid)
+    --log ("md: " ..mainDeck.getGUID())
+    --log ("#fd:" .. #fromdeck)
+
+    if (bag.guid == mainDeck.guid) then
+      tablepush(fromdeck, obj.guid)
+      Wait.time(function() tablepop(fromdeck,obj.guid) end,2.0,0)
+    end
+
+  --   if (player) then
+  --   --  debug("... belonged to " .. player)
+  --     local lScore, lDesc = scoreTarget(bag)
+  --     bag.setDescription(lDesc)
+  --     tablePlayerDecks[player][idx].score = lScore
+  --     tablePlayerDecks[player][idx].desc = lDesc
+  -- --    table.remove(tablePlayerDecks[player],idx)
+  --   end
+    --debug("Decks ----------------")
+    --tableDump(tablePlayerDecks)
+  end
+end
+
+
+-- function onObjectDestroy(obj)
+--   if not gbInitializing then
+--     debug("destroy: ".. obj.guid .. " tag="..obj.tag)
+--     if (obj.tag == "Deck") then
+--       local player, idx = findUsedThing(tablePlayerDecks, obj.getGUID())
+--       if (player) then
+--         table.remove(tablePlayerDecks[player], idx)
+--       end
+--     end
+--   end
+-- end
+
+function onObjectEnterContainer(bag, obj)
+  if (gbSpreading) then
+    debug('Skipped one')
+  end
+  if not gbInitializing  and not gbSpreading then
+    local lGuid = obj.getGUID()
+    local lTag = obj.tag
+    local lDesc = obj.getDescription()
+    --Wait.time(function() enteredAndWaited(bag,lGuid,lTag, lDesc)  end, 0.5)
+  end
+end
+
+-- function findUsedThing(tbl, target)
+--   local sPlayer = ""
+--   for sPlayer, playersDecks in pairs(tbl) do
+--     --debug("checking player " .. sPlayer)
+--     if (playersDecks) then
+--       --debug("payersDecks type = " .. type(playersDecks))
+--       for i, oneDeck in ipairs(playersDecks) do
+--           debug("   against ".. oneDeck.guid)
+--           if (oneDeck.guid==target) then
+--             debug("found")
+--             return sPlayer, i
+--           end
+--       end
+--     end
+--   end
+--   return nil, nil
+-- end
+
+function playerName(player_color)
+  local name = player_color
+  if (Player[player_color].steam_name) then
+    name = Player[player_color].steam_name
+  end
+  return name
+end
+
+-- =============================================================================
+function objectInZone(obj, zone)
+  local zoneObjects = shallowCopy(zone.getObjects())
+  for k, oneCard in pairs(zoneObjects) do
+    if (oneCard.guid == obj.guid) then
+      return true
+    end
+  end
+  return false
+end
+
+-- =============================================================================
+function AssessLayoutableForOne(obj, bIsLayoutable, sDeckType, iWildCount)
+  local shortColor, shortName, _ = cardDeets(obj)
+  debug ("Assessing " .. shortName .. " DT:" .. sDeckType,"Assessment" )
+  if ((sDeckType != shortName) and (string.match(shortName,"[3456789]") or shortName == "Jack" or shortName == "Queen" or shortName == "King" or shortName == "Ace")) then
+    if sDeckType == "" then
+      sDeckType = shortName
+    else
+      debug ("fail b/c DeckType(".. sDeckType ..") <> shortName(".. shortName .. ") ","Assessment")
+      bIsLayoutable = false
+    end
+  end
+  if (shortName == "2" or shortName == "Joker") then
+    iWildCount = iWildCount+1
+    if iWildCount>2 then
+      if sDeckType == "" then
+        sDeckType = "Wild"
+      else
+        if (sDeckType != "Wild") then
+          debug ("fail b/c >2 wild and decktype <> wild or blank","Assessment")
+          bIsLayoutable = false
+        end
+      end
+    end
+  end
+  return bIsLayoutable, sDeckType, iWildCount
+end
+
+-- =============================================================================
+function playDiscardSound()
+  if (soundCube and gbPlaySounds) then
+    soundCube.AssetBundle.playTriggerEffect(giDiscardSound)
+  end
+end
+
+
+-- =============================================================================
+function isLayoutable(playerColor, tCards)
+sCardType = ""
+local sDeckType = ""
+local iWildCount = 0
+local bIsLayoutable = true
+local itemCount = 0
+  debug("Start Check","prob1")
+  local sel = iif(tCards, tCards, Player[playerColor].getSelectedObjects())
+
+  for i=1,#sel do
+    local item=sel[i]
+--    log("checking item.tag = " .. item.tag)
+    if (item.tag == "Deck") then
+      local deckCards = shallowCopy(item.getObjects())
+      for k, oneCard in pairs(deckCards) do
+        itemCount = itemCount + 1
+        bIsLayoutable, sDeckType, iWildCount = AssessLayoutableForOne(oneCard,bIsLayoutable, sDeckType, iWildCount)
+        if not (bIsLayoutable) then
+          debug("End Check","prob1")
+          return false
+        end
+      end
+    elseif (item.tag == "Card") then
+      itemCount = itemCount + 1
+      bIsLayoutable, sDeckType, iWildCount = AssessLayoutableForOne(item,bIsLayoutable, sDeckType, iWildCount)
+      if not (bIsLayoutable) then
+        debug("End Check","prob1")
+        return false
+      end
+    else
+--      log("Error.. assessing layout and item is type/tag: " .. item.tag)
+      bisLayoutable=false
+      debug("End Check","prob1")
+      return false
+    end
+  end
+
+  if itemCount <= 2 then
+--    log ("fail b/c itemcount <=2")
+    if false then
+      tCards = layoutVerticalStack(playerColor, obj_Zone[playerColor].getRotation(), sel[1], nil)
+      if tCards then
+        debug("tCard cnt = "..#tCards,"prob1")
+      else
+        debug("no tCards","prob1")
+      end
+      -- this should really check the contents, not just count
+      -- may be a problem later
+      if (tCards and #tCards != #sel) then
+        for k, v in pairs(tCards) do
+          v.addToPlayerSelection(playerColor)
+        end
+        return isLayoutable(playerColor)
+      end
+    end
+    bIsLayoutable = false
+    debug("End Check","prob1")
+    return false
+  end
+  if (itemCount >6 and #sel==1) then
+--    log ("fail b/c itemcount >2 and selcount =1")
+--   This means it's one deck of > 6 cards.. leave it alone
+    bIsLayoutable = false
+    debug("End Check","prob1")
+    return false
+  end
+
+  debug("End Check","prob1")
+  return bIsLayoutable
+end
+
+
+-- =============================================================================
+function getNonWild(tCards, oElseCard)
+  for _, oSelCard in pairs(tCards) do
+    local sShortColor, sShortName, sShortType = cardDeets(oSelCard)
+    if (sShortColor != "Wild") then
+      return oSelCard
+    end
+  end
+  if (oElseCard) then
+    return oElseCard
+  end
+  return nil
+end
+
+-- =============================================================================
+function queueSpread (playerColor, oDropped)
+
+  local vDesiredPos = nil
+  local sel = Player[playerColor].getSelectedObjects()
+  -- we either want to have a card being dropped or a whole Selection
+  -- if we have neither, then bail out
+  debug("oDropped = "..iif(oDropped, oDropped.getDescription(),"none"),"queuespread")
+  debug("sel = "..dump(sel),"queuespread")
+  if (not oDropped and #sel==0) then
+    debug("nothing selected..","prob1")
+    playerStuff[playerColor].bSpreadQueued = false
+    return
+  end
+
+  -- If we do have a selection and it's huge, its' not likely
+  -- meant for laying out (more like emptying a hand during debug)
+  -- so bail out
+  if (#sel>15) then
+    debug("Big drop, just drop them","prob1")
+    playerStuff[playerColor].bSpreadQueued = false
+    return
+  end
+
+  -- for the moment, we've abandoned the whole "make sure they're not
+  -- still moving" part.
+  bNoMovement=true
+  if (false) then
+    for i=1,#sel do
+      local item=sel[i]
+      x = item.getVelocity()
+      if (x.x!=0 or x.y!=0 or x.z!=0) then
+        bNoMovement = false
+        debug("still moving..","prob1")
+        break
+      end
+    end
+  end
+
+  -- get a representative card from all the selected cards that ISN'T wild
+  -- if none match (all wild?) then just return the one we know about.
+  oDropped = getNonWild(sel, oDropped)
+
+  -- for the moment, this is always true
+  if (bNoMovement) then
+    debug("done moving..","prob1")
+
+    -- Get the rotation of the hand zone of this player color
+--    local vRot = obj_Zone[playerColor].getRotation()
+    local vRot = getPlayerRotationFromObject(oDropped)
+
+    -- find cards within the vertical of the dropped card (or selection if oDropped is nill)
+    -- this returns the list of cards found up to and NOT including any cards with
+    -- a different non-wild value.
+    tCards, bFoundDifferentCard = getCardsInMyVertical2(oDropped, vRot, playerColor, nil, Player[playerColor].getPointerPosition())
+
+    -- tCards are all the cards in the vertical, but we're possibly dropping a few
+    -- cards that are horizontally laid out, like from a hand.  so we need to add all
+    -- the currently selected cards to tCards before we spread
+    for _, oSelCard in pairs(sel) do
+      if (tablefind(tCards,oSelCard)==-1) then
+        table.insert(tCards,oSelCard)
+      end
+    end
+
+    -- if we did find a "stopper" card, drop a debug but keep going
+    if (bFoundDifferentCard) then
+      debug("Found Different Card!!!", "queuespread")
+    end
+
+    -- just for debugging, let's dump out all the cards that were returned
+    -- by the vertical check
+    for i, oCard in ipairs(tCards) do
+      debug("tCards[".. i .. "] = " .. oCard.getDescription(),"queuespread")
+    end
+
+    -- if we found a different card, let's not try and merge these two
+    -- sets.. we don't want 5's mixed with the 10's.
+    -- also, if we have no cards in the vertical at all, there's no point
+    -- so we'll also skip out.
+--    if tCards and not bFoundDifferentCard then
+    if tCards then
+      -- check to see if anything is in the vertical that's not also in the
+      -- current selection (the set being dropped).  If there IS, then we're
+      -- dropping on an existing stack and we should line up with where it
+      -- already is.  Otherwise, we drop at the mousepointer because everything
+      -- in tCards was already in our selection
+      local tTableCards = {}
+      local bDroppingOnCard = false
+      -- start a loop through all the cards returned by the vertical check
+      for _, oCard in ipairs(tCards) do
+        debug("looping through vert found card: " .. oCard.getDescription(), "queuespread")
+        local bCardInSel = false
+        -- for each of the cards in the vertical check, look to see if it's
+        -- in the current selection.  If it is, set a flag and break out
+        -- of the inner loop (no reason to keep looking)
+        for _, oSel in ipairs(sel) do
+          debug("checking vs selected card: " .. oSel.getDescription(), "queuespread")
+          if (oCard.getGUID()==oSel.getGUID()) then
+            debug (oCard.getDescription() .. " = " .. oSel.getDescription() .. " so Breaking Loop","queuespread")
+            bCardInSel = true
+            break
+          end
+        end
+
+        -- if this card wasn't in the selection group, then we know that
+        -- we're dropping on some existing cards on the table, so set a
+        -- flag to tell us that.  Also, let's keep track of a table of
+        -- "tablecards" for all the cards that are already laid out
+        if (not bCardInSel) then
+          debug("Dropping on a card: " .. oCard.getDescription(),"queuespread")
+          bDroppingOnCard = true
+          table.insert(tTableCards, oCard)
+          -- no break, because we want to fill up tTableCards
+        end
+      end
+      -- Simple debug.. call out if we're not dropping on any card
+      if (not bDroppingOnCard) then
+        debug("Not dropping on any card","queuespread")
+      else
+        -- Ok, so we're dropping on some existing cards.. let's find the
+        -- highest and most left of those cards (we really only care about
+        -- the highest)
+        local oLeftest, oHighest = findLeftMostAndHighest(tTableCards, vRot)
+
+        -- if we didn't find one, that's gotta be an error, log it.
+        if (not oHighest) then
+          log ("ERROR: Looked for the highest card to spread but didn't find one?")
+        else
+          -- we did find one.. so get its position, then add some to the height
+          -- because the position is center of the card but we're looking for
+          -- a spot higher.  This is more trial and error than math.  advancing it
+          -- by the value of 1 seems to work. We use addRelativePos(vert..) because
+          -- what is "up" for each player is different. The function figures that out.
+          vDesiredPos = oHighest.getPosition()
+          --vDesiredPos = addRelativePos("vert", vDesiredPos, vRot, 1)
+        end
+
+        -- loop through EVERY card in the vertical and make sure it's part
+        -- of the player's selection.
+        Player[playerColor].clearSelectedObjects();
+        if false then
+          for _, oCard in pairs(tCards) do
+            debug("adding to selection: ".. oCard.getDescription(),"queuespread")
+            oCard.addToPlayerSelection(playerColor)
+          end
+          if (gtDebugFlags["queuespread"]) then
+            local tDbgSel = Player[playerColor].getSelectedObjects()
+            debug("All cards in updated selection group:","queuespread")
+            for _, oOne in pairs(tDbgSel) do
+              debug("    " .. oOne.getDescription(),"queuespread")
+            end
+          end
+        end -- if false
+      end
+    end
+
+    -- So, now the selection has everything we want to spread out in it,
+    -- whether there were table cards or no table card, vertical-hits or none.
+    -- If we don't yet have a desired position (top of the existing table cards
+    -- if we have them), then let's just drop the cards where the mouse pointer is.
+    if not vDesiredPos then
+      vDesiredPos = Player[playerColor].getPointerPosition()--1234
+      vDesiredPos = addRelativePos("vert", vDesiredPos, vRot, gfDropShift)
+    end
+
+    -- Almost there.. so let's make sure that the current selection is
+    -- "layoutable" (not a mixed set, etc..) and, if so, spread it.
+    if (isLayoutable(playerColor, tCards)) then
+      -- if they're holding down the "mask" button, then we want them laid out
+      -- toward a different player.. otherwise, toward us.
+      if (not playerStuff[playerColor].bMaskActions) then
+      --  spread3("s",playerColor,0)
+        debug("spread - 1","queuespread")
+        -- do the spread, for this color, dropping it at our desired position
+        -- then clear the semaphores so they can queuespread again
+         Wait.time(function()
+              spread3("s",playerColor,1,vDesiredPos, tCards);
+              playerStuff[playerColor].bSpreadQueued = false;
+              debug("clearing selected objects for " .. playerColor,"queuespread");
+              Player[playerColor].clearSelectedObjects();
+            end, 0.1)
+      else
+      --  spread3("s",playerColor,1)
+        debug("spread - 0","queuespread")
+        -- do the spread, for this color, dropping it at our desired position,
+        -- then clear the semaphores so they can queuespread again
+        Wait.time(function()
+              spread3("s",playerColor,0,vDesiredPos,tCards);
+              playerStuff[playerColor].bSpreadQueued = false;
+              debug("clearing selected objects for " .. playerColor,"queuespread");
+              Player[playerColor].clearSelectedObjects();
+            end, 0.1)
+      end
+    else
+      -- if it wasn't layoutable, then let's just end here.
+      -- clear the semaphores for being mid-spread so that
+      -- they can queue up another if they need
+      playerStuff[playerColor].bSpreadQueued = false
+
+    end
+  else
+    -- if we're still moving (currently, not possible as we've got an "if true" above), wait for .2sec and check again
+    Wait.time(function() queueSpread(playerColor, oDropped) end,0.1)
+  end
+end
+
+-- =============================================================================
+function checkFootNote(sColor, iCheckCount)
+  if (not iCheckCount) then
+    iCheckCount = 0
+  end
+  local handCards = Player[sColor].getHandObjects()
+  if (#handCards<4) then
+    local bFootExists = false
+    if (not giPlayerCount) then
+      local p = getSortedSeatedPlayers()
+      giPlayerCount = #p
+    end
+    for _, scoreZone in ipairs(objScoreZones[giPlayerCount]["Colors"][sColor].zones) do
+        for _, occupyingObject in ipairs(scoreZone.obj.getObjects()) do
+          if ( (occupyingObject.tag == "Deck" or occupyingObject.tag == "Card" ) and occupyingObject.is_face_down ) then
+            bFootExists = true
+            break
+          end
+        end
+        if (bFootExists) then
+          break
+        end
+      --end
+      --if (bFootExists) then
+      --  break
+      --end
+    end
+    if (bFootExists)  then
+      if (playerStuff[sColor].bShowFootNotes) then
+        broadcastToColor("Don't forget your foot",sColor)
+        textFootNotes[sColor].TextTool.setValue("Remember Foot")
+        textFootNotes[sColor].TextTool.setFontColor("Yellow")
+      end
+    else -- else
+      if (#handCards==0) then
+        local _, tBookCount = countScoreInternal()
+        log("tBookCount=".. dump(tBookCount))
+        if (tBookCount[sColor][gi_RED_BOOK_SCORE]>1 and tBookCount[sColor][gi_BLACK_BOOK_SCORE]>1) then
+          soundCube.AssetBundle.playTriggerEffect(13)
+          broadcastToAll(coolName(sColor) .. " has gone out!!","Yellow")
+        else
+          if (iCheckCount<5) then
+            Wait.time(function () checkFootNote(sColor, iCheckCount+1) end, 1.0)
+          end
+        end
+      end
+      textFootNotes[sColor].TextTool.setValue(" ")
+      textFootNotes[sColor].TextTool.setFontColor("Yellow")
+    end
+  else
+    textFootNotes[sColor].TextTool.setValue(" ")
+    textFootNotes[sColor].TextTool.setFontColor("Yellow")
+  end
+end
+
+
+function onObjectDrop(player_color, dropped_object)
+     -- if it's inside the discard zone, center it over the discard pile
+    if (obj_Zone_Discard) then
+      if (objectInZone(dropped_object, obj_Zone_Discard)) then
+        dropped_object.setPosition(obj_Zone_Discard.getPosition())
+      end
+      if (playerStuff[player_color].bAutoLayout) then
+        if (not objectInZone(dropped_object, obj_Zone_Discard)
+           and (not (objectInZone(dropped_object, obj_Zone_Green)
+                or objectInZone(dropped_object, obj_Zone_White)
+                or objectInZone(dropped_object, obj_Zone_Blue )
+                or objectInZone(dropped_object, obj_Zone_Red)))) then
+          if (not playerStuff[player_color].bSpreadQueued and not playerStuff[player_color].bMaskActions) then
+            playerStuff[player_color].bSpreadQueued = true
+            -- only queue up if the object is a card
+            if (dropped_object.tag == "Card") then
+              debug("queueing spread","queuespread")
+              queueSpread(player_color,dropped_object)
+            else
+              debug("skipping queueing spread, dropped obj is not a card (" .. dropped_object.tag .. ")","queuespread")
+              playerStuff[player_color].bSpreadQueued = false
+            end
+          else
+            debug("skipping queueing spread, player.bSpreadQueued = " .. iif(playerStuff[player_color].bSpreadQueued,"true","false"),"queuespread")
+            playerStuff[player_color].bSpreadQueued = false
+          end
+        end
+      end
+    end
+
+    local iPos = findInTable(tableDiscard, dropped_object.getGUID())
+    if (iPos>-1) then
+      --      debug(player_color .. " dropped IN ZONE " .. dropped_object.getGUID())
+      if (not playerStuff[player_color].bMaskActions) then
+        local name = coolName(player_color)
+        textDiscardValue.TextTool.setValue(name)
+        textDiscardValue.TextTool.setFontColor(player_color)
+        if (gb_USE_TURNS and player_color==Turns.turn_color) then
+          Turns.turn_color=Turns.getNextTurnColor()
+        end
+        announceAll(name .. " discarded ")
+        checkFootNote(player_color)
+        playDiscardSound()
+      end
+      if dropped_object.tag == "Card" then
+        tablepush(fromdiscard, dropped_object.guid)
+      --  Wait.time(function() tablepop(fromdiscard,dropped_object.guid) end,2.0,0)
+      else
+        local deckCards = shallowCopy(dropped_object.getObjects())
+        for k, oneCard in pairs(deckCards) do
+          tablepush(fromdiscard, oneCard.guid)
+        --  Wait.time(function() tablepop(fromdiscard,dropped_object.guid) end,2.0,0)
+        end
+      end
+    --  local player, idx = findUsedThing(tablePlayerCards, dropped_object.getGUID())
+    --  if (player) then
+    --    table.remove(tablePlayerCards[player], idx)
+    --  end
+      --tableDump(tablePlayerCards)
+      table.remove(tableDiscard,iPos);
+    end
+end
+
+
+function scoreCard(oneCard)
+  local lDesc = ""
+  local lGuid = ""
+  local scr=0
+  --log("type = "..type(oneCard))
+  if (type(oneCard)=="table") then
+    lGuid = oneCard.guid
+    lDesc = oneCard.description
+  else
+    lGuid = oneCard.getGUID()
+    lDesc = oneCard.getDescription()
+  end
+  --log("scoring: ".. lGuid .. " (".. type(oneCard) .. ")")
+  _, shortName, _ = cardDeets(oneCard)
+--  log("shortname = " .. shortName)
+  --shortName = string.match(oneCard.description,"[%a%d]*")
+  if (string.match(shortName,"[4567]")) then
+    scr = 5
+  elseif shortName=="2" or shortName=="Ace" then
+    scr=20
+  elseif (shortName=="3") then
+    if (lDesc == "3 of Clubs" or lDesc=="3 of Spades") then
+      scr = 5
+    else
+        scr = giRed3Penalty
+    end
+  elseif (shortName=="8" or shortName=="9" or shortName=="10" or shortName=="Jack" or shortName=="Queen" or shortName=="King"  ) then
+    scr = 10
+  elseif (shortName=="Joker") then
+    scr = 50
+  else
+    debug("ERROR: CAN NOT SCORE " .. oneCard.tag .. ": g:" .. oneCard.getGUID() .. " - d:" .. oneCard.getDescription())
+    scr = 0
+  end
+  return scr, lDesc
+end
+
+function hoverTroll()
+  playerList = Player.getPlayers()
+  for _, playerReference in ipairs(playerList) do
+    hObj = playerReference.getHoverObject()
+    if (hObj and hObj.getQuantity()>1) then
+      dckCnt, dckDesc, _ = scoreTarget(hObj)
+      hObj.setDescription(dckDesc)
+    end
+  end
+  return 1
+end
+
+function scoreTarget(target)
+  local bInconsistentDeck = false
+  local guidGotBlack = nil
+  local guidGotRed = nil
+  local guidGotJoker = nil
+  local bTopIsJoker = false
+  local bTopIsBlack = false
+  local bTopIsRed = false
+  local iWildCount = 0
+  local cardType = nil
+  local shortName = nil
+  local shortSuit = nil
+  local score = 0
+  local sDesc = ""
+  local bookScore = 0
+
+  --debug("Scoring thing of type " .. type(target))
+  if target.tag=="Deck" then
+--  if target.getQuantity()>1 then
+    --log("decking")
+    contents = target.getObjects()
+    if (contents) then
+      debug("In Contents...")
+      debug("contents = " .. #contents)
+      iRed3Count =0
+      for k, oneCard in pairs(contents) do
+        local oneScore = scoreCard(oneCard)
+        if (oneScore) then
+          score = score + oneScore
+        end
+        _, shortName, shortSuit = cardDeets(oneCard)
+        if shortName=="3" then
+          iRed3Count = iRed3Count + 1
+        end
+    --            shortName = string.match(oneCard.description,"[%a%d]*")
+    --            shortSuit = string.match(oneCard.description,"[%a%d]*$")
+    --            debug("k = " .. k .." - " .. shortName .. "/" .. shortSuit )
+        if (shortName=="2") or (shortName=="Joker") then
+          iWildCount = iWildCount + 1
+          if (shortName=="Joker") then
+              if (k==target.getQuantity()) then
+                bTopIsJoker=true
+                debug("Top is Joker")
+              end
+            guidGotJoker = oneCard.guid
+          end
+        else
+          if (shortSuit=="Clubs") or (shortSuit=="Spades") then
+            if (k==target.getQuantity()) then
+              bTopIsBlack=true
+              debug("Top is Black")
+            end
+            guidGotBlack = oneCard.guid
+
+    --                debug('GotBlack ' .. oneCard.description)
+          else
+            if (k==target.getQuantity()) then
+              bTopIsRed=true
+              debug("Top is Red")
+            end
+            guidGotRed = oneCard.guid
+    --                debug('GotRed' .. oneCard.description)
+          end
+          if (not cardType) then
+            cardType = shortName
+          end
+          if (shortName != cardType) or ( (shortName=="3") and (giRuleSet != giCaliforniaRules) ) then
+            bInconsistentDeck = true
+          end
+        end
+    --            debug("oneCard:" .. shortName .. " --- " .. scr )
+      end
+    end
+    sAddTxt = ""
+    if (target != mainDeck) then
+      --debug('Guids = ' .. guidGotBlack .. ' - ' .. guidGotRed)
+--      if (iRed3Count>0) then
+--        if (giRuleSet == giCaliforniaRules) then
+--          if (bInconsistentDeck) then
+--            sAddTxt = "\n" .. "Red 3's counted as " .. giRed3Penalty .. " in mixed deck"
+--          else
+--            score = score - giRed3Penalty*iRed3Count + 50*iRed3Count
+--            sAddTxt = "\n" .. "Red 3's counted as " .. giRed3SideStackScore .. " in extra-card deck"
+--          end
+--        elseif (giRuleSet==giNorthCarolinaRules) then
+--          sAddTxt = "\n" .. "Red 3's counted as " .. giRed3Penalty .. " in mixed deck"
+--        end
+--      end
+
+      sDesc = "DeckScore: ".. score
+      -- Reused Score now that we've put it in getDescription
+      -- from here on, it's the score of the meld
+      --score=0
+      --debug("score = " .. sDesc)
+      bProblem = false
+      iQty = target.getQuantity()
+      if (giRuleSet != giCaliforniaRules) or (iRed3Count != iQty) then
+        if iQty<7 then
+          sDesc = sDesc .. "\n" .. "Incomplete Book (" .. iQty .. " cards)"
+          bProblem = true
+        end
+        if ( (not guidGotRed) and ( (giRuleSet != giCaliforniaRules) or (iQty>iWildCount) ) ) then
+            sDesc = sDesc .. "\n" .. "Incomplete Book (Need Red)"
+            bProblem = true
+        end
+        if ( (not guidGotBlack) and ( (giRuleSet != giCaliforniaRules) or (iQty>iWildCount) ) ) then
+          sDesc = sDesc .. "\n" .. "Incomplete Book (Need Black)"
+          bProblem = true
+        end
+        if ( (iWildCount>2) and (giRuleSet == giNorthCarolinaRules) ) then
+            sDesc = sDesc .. "\n" .. "Invalid Book (too many wild)" -- .. iWildCount .. " Wild)"
+            bProblem = true
+        end
+        if ((iWildCount>2) and (giRuleSet==giCaliforniaRules) and (iQty>iWildCount)) then
+            sDesc = sDesc .. "\n" .. "Invalid Book (too many wild)" -- .. iWildCount .. " Wild)"
+            bProblem = true
+        end
+        if (bInconsistentDeck) then
+          sDesc = sDesc .. "\n" .. "Invalid Book (mixed book)"
+          bProblem = true
+        end
+        if (not bProblem) then
+          if ( (giRuleSet==giCaliforniaRules) and (iWildCount==iQty) ) then
+            sDesc = sDesc .. "\n" .. "Wild Book"
+            bookScore=gi_WILD_BOOK_SCORE
+            --score=1500
+            if (not bTopIsJoker) and (guidGotJoker) then
+                local deckPos = target.getPosition()
+                local deckScale = target.getScale()
+                local oneGot = target.takeObject{position={deckPos.x, deckPos.y+deckScale.y/2+0.05, deckPos.z},guid=guidGotJoker}
+            end
+          elseif (iWildCount>0) then
+            sDesc = sDesc .. "\n" .. "Black Book"
+            bookScore=gi_BLACK_BOOK_SCORE
+            --score=300
+            if (not bTopIsBlack) then
+                local deckPos = target.getPosition()
+                local deckScale = target.getScale()
+                local oneGot = target.takeObject{position={deckPos.x, deckPos.y+deckScale.y/2+0.05, deckPos.z},guid=guidGotBlack}
+            end
+          else
+            sDesc = sDesc .. "\n" .. "Red Book"
+            bookScore=gi_RED_BOOK_SCORE
+            --score=500
+            if (not bTopIsRed) then
+              local deckPos = target.getPosition()
+              local deckScale = target.getScale()
+              local oneGot = target.takeObject{position={deckPos.x, deckPos.y+deckScale.y/2+0.05, deckPos.z},guid=guidGotRed}
+            end
+          end
+        end
+      end
+    else
+      sDesc = sDesc .. "\nMain Deck"
+    end
+    sDesc = sDesc .. sAddTxt
+    --debug("score2 = " .. sDesc)
+  else
+    --  log("single")
+      score, sDesc = scoreCard(target)
+  end
+  --debug("Returning = " .. score .. " / " .. sDesc)
+  -- Note: score is the card value if it's a card
+  --       score is the meld value if it's a valid deck
+  if (not score) then
+    score = 0
+  end
+  if (not bookScore) then
+    bookScore=0
+  end
+  if (target.is_face_down) then
+      score = -1 * score
+      bookScore = 0
+  end
+  return score, sDesc, bookScore
+end
+
+function iif(crit, iftrue, ifnot)
+  if (crit) then
+    return iftrue
+  end
+  return ifnot
+end
+
+function coolName(sColor)
+  return iif(playerStuff[sColor].nick,playerStuff[sColor].nick,iif(Player[sColor].steam_name,Player[sColor].steam_name,sColor))
+end
+
+function writeToNotebookTab(sMessage, iTab)
+  if not iTab then
+    iTab = 1
+  end
+  if (not sMessage) then
+    sMessage = "<nil value?!>"
+  end
+  tabInfo = Notes.getNotebookTabs()
+  if (tabInfo[iTab].body) then
+    sNote = tabInfo[iTab].body .. "\n------------------------------------\n" .. sMessage
+  end
+  params = {
+      index = iTab-1,
+      body = sNote,
+  }
+  Notes.editNotebookTab(params)
+end
+
+function copyScores()
+  sNote = ""
+  playerList = getSortedSeatedPlayers()
+  for iP, playerColor in ipairs(playerList) do
+    sNote = sNote .. "\n" .. coolName(playerColor) .. ", " .. gtScores[playerStuff[playerColor].num][1] .. ", " .. gtScores[playerStuff[playerColor].num][2] .. ", " .. gtScores[playerStuff[playerColor].num][3] .. ", " .. gtScores[playerStuff[playerColor].num][4].. ", TOTAL = " .. gtScores[playerStuff[playerColor].num][5]
+  end
+  sNote = sNote .. "\n\n"
+  sNote = sNote .. "\n" .. "#score set 1 " .. gtScores[1][1] .. " ".. gtScores[2][1] .. " ".. gtScores[3][1] .. " ".. gtScores[4][1] .. " "
+  sNote = sNote .. " 2 " .. gtScores[1][2] .. " ".. gtScores[2][2] .. " ".. gtScores[3][2] .. " ".. gtScores[4][2] .. " "
+  sNote = sNote .. " 3 " .. gtScores[1][3] .. " ".. gtScores[2][3] .. " ".. gtScores[3][3] .. " ".. gtScores[4][3] .. " "
+  sNote = sNote .. " 4 " .. gtScores[1][4] .. " ".. gtScores[2][4] .. " ".. gtScores[3][4] .. " ".. gtScores[4][4] .. " "
+  sNote = sNote .. " hand " .. giHand .. " first " .. gsFirstToGoFirstColor .. "\n\n\n"
+  tabInfo = Notes.getNotebookTabs()
+  if (tabInfo[1].body) then
+    sNote = tabInfo[1].body .. "\n------------------------------------\n" .. sNote
+  end
+  params = {
+      index = 0,
+      title = "Scores",
+      body = sNote,
+      color = "Grey"
+  }
+  Notes.editNotebookTab(params)
+end
+
+function onChat(message, sender)
+  local sColor = sender.color
+  local sMsg = string.lower(message)
+
+
+  if (string.gsub(message,"%s+","")=="#admin") then
+    Player[sColor].print ("#debug : no debugs")
+    Player[sColor].print ("#debug <key>: enable a debug key")
+    Player[sColor].print ("#direction [true|false]: hide/show the direction buttons")
+    Player[sColor].print ("#offset: reset the offset between cards in row to default")
+    Player[sColor].print ("#offset <num>: set the offset between cards in row")
+    Player[sColor].print ("#dev [true|false]: turn on/off development features")
+    return false
+  end
+
+  if (string.gsub(message,"%s+","")=="#help") then
+    Player[sColor].print ("#init : reset board")
+    Player[sColor].print ("#sort <string> [, <color>] : change sort")
+    Player[sColor].print ("#sort help : sort help")
+    Player[sColor].print ("#sound <num> : set discard sound to #")
+    Player[sColor].print ("#nick <string>[, <color>] : Set nickname")
+    Player[sColor].print ("#score reset")
+    Player[sColor].print ("#score set <hand> <p1> <p2> <p3> <p4>")
+    Player[sColor].print ("#score hand <hand>")
+    Player[sColor].print ("#score f2gf <color>")
+    Player[sColor].print ("#score copy")
+    Player[sColor].print ("#footnote [true|false] [, <color>] : turn footnote warnings on/off for self or target color")
+    Player[sColor].print ("#align [true|false] [, <color>] : evenly space card stacks")
+    return false
+  end
+
+  if string.sub(message,1,5)=="#nick" then
+    local sNick, sTargetColor = string.match(message,"#nick *([^,]*),* *(.*)")
+    if (sTargetColor and sTargetColor!="") then
+      debug("sTargetColor="..sTargetColor.."." ,"panel")
+      sTargetColor = string.lower(sTargetColor)
+      sColor = sTargetColor:gsub("^%l", string.upper)
+    end
+    debug("nick="..sNick .. " color="..sColor,"panel")
+    playerStuff[sColor].nick=sNick
+    setPlayerNamesOnScoresheet()
+    return false
+  end
+
+  if string.sub(message,1,9)=="#footnote" then
+    local sVal, sTargetColor = string.match(sMsg,"#footnote *([^,]*),* *(.*)")
+    if (sTargetColor and sTargetColor!="") then
+      sTargetColor = string.lower(sTargetColor)
+      sColor = sTargetColor:gsub("^%l", string.upper)
+    end
+    playerStuff[sColor].bShowFootNotes=(sVal=="true")
+    printToColor("ShowFootNotes set to " .. iif(playerStuff[sColor].bShowFootNotes,"true","false"),sColor)
+    textFootNotes[sColor].TextTool.setValue(" ")
+    if (sender.color != sColor) then
+      printToColor("ShowFootNotes set to " .. iif(playerStuff[sColor].bShowFootNotes,"true","false").. " for " .. coolName(sColor),sender.color)
+    end
+    return false
+  end
+
+  if string.sub(message,1,6)=="#align" then
+    local sVal, sTargetColor = string.match(sMsg,"#align *([^,]*),* *(.*)")
+    if (sTargetColor and sTargetColor!="") then
+      sTargetColor = string.lower(sTargetColor)
+      sColor = sTargetColor:gsub("^%l", string.upper)
+    end
+    if (sVal=="true") then
+      playerStuff[sColor].bAlign = math.abs(playerStuff[sColor].bAlign)
+    elseif (sVal=="high") then
+      playerStuff[sColor].bAlign = 1
+  elseif (sVal=="low") then
+      playerStuff[sColor].bAlign = 3
+    else
+      playerStuff[sColor].bAlign = math.abs(playerStuff[sColor].bAlign)*-1
+end
+--    playerStuff[sColor].bAlign=iif(sVal=="true",math.abs(playerStuff[sColor].bAlign),math.abs(playerStuff[sColor].bAlign)*-1)
+    printToColor("Alignment set to " .. gt_ALIGN_WORDS[playerStuff[sColor].bAlign],sColor)
+    textFootNotes[sColor].TextTool.setValue(" ")
+    if (sender.color != sColor) then
+      printToColor("Alignment set to " .. gt_ALIGN_WORDS[playerStuff[sColor].bAlign] .. ' for ' .. coolName(sColor),sender.color)
+    end
+    return false
+  end
+
+
+  if sMsg=="#sound" then
+    effectTable = soundCube.AssetBundle.getTriggerEffects()
+    debug(dump(effectTable),"panel")
+    for k,v in pairs(effectTable) do
+      printToColor(v.index .. ": " .. v.name,sColor)
+    end
+    return false
+  end
+
+  if string.sub(sMsg,1,5)=="#play" then
+    local sVal = string.match(sMsg,"#play *(.*)")
+    local sSound = string.match(sMsg,"(%d+)")
+    if tonumber(sVal) then
+      layoutScoreZones(tonumber(sVal))
+      return false
+    end
+  end
+
+  if (string.gsub(sMsg,"%s+","")=="#debug") then
+    gtDebugFlags={
+    }
+    return false
+  end
+
+  if string.sub(message,1,4)=="#dev" then
+    local sVal = string.match(sMsg,"#dev *(.*)")
+    if (sVal == "ghost") then
+      local sVal = string.match(sMsg,"#dev *ghost *(.*)")
+      gbDevGhostBoxes=(sVal=="true")
+      printToColor("Ghost set to " .. iif(gbDevGhostBoxes,"true","false"),sColor)
+    else
+      gbShowDirButtons=(sVal=="true")
+      printToColor("Dir buttons set to " .. iif(gbShowDirButtons,"true","false"),sColor)
+      setButtons()
+      gbDevGhostBoxes=(sVal=="true")
+      printToColor("Ghost set to " .. iif(gbDevGhostBoxes,"true","false"),sColor)
+    end
+    return false
+  end
+
+  if string.sub(sMsg,1,10)=="#dev" then
+    local sVal = string.match(sMsg,"#dev ghost *(.*)")
+    gbDevGhostBoxes=(sVal=="true")
+    return false
+  end
+
+
+
+  if string.sub(message,1,10)=="#direction" then
+    local sVal = string.match(sMsg,"#direction *(.*)")
+    gbShowDirButtons=(sVal=="true")
+    setButtons()
+    return false
+  end
+
+  -- if string.sub(sMsg,1,9)=="#walltint" then
+  --   local sVal = string.match(sMsg,"#walltint *(.*)")
+  --   printToColor("Wall Tint set to " .. sVal,sColor)
+  --   if (tonumber(sVal)) then
+  --     for i, oWallProps in pairs(objScoreZones[#Player.getPlayers()]["Walls"]) do
+  --       local objWalls[i].getColorTint(tint)
+  --       tint.a = tonumber(sVal)
+  --       objWalls[i].setColorTint(tint)
+  --     end
+  --   end
+  --   return false
+  -- end
+
+
+  if string.sub(sMsg,1,6)=="#debug" then
+    local sVal = string.match(sMsg,"#debug *(.*)")
+    gtDebugFlags[sVal]=1
+    printToColor("Debug set to " .. dump(gtDebugFlags),sColor)
+    return false
+  end
+
+
+  if sMsg=="#offset" then
+    gfSpreadMult = 0.8
+    printToColor("setting offset to 0.8 (default)",sColor)
+    return false
+
+  end
+
+  if string.sub(sMsg,1,7)=="#offset" then
+    local sVal = string.match(sMsg,"#offset *(.*)")
+    if (tonumber(sVal)) then
+      gfSpreadMult = tonumber(sVal)
+      printToColor("setting offset to " .. sVal,sColor)
+    else
+      printToColor(sVal .. " is not a number",sColor)
+    end
+    return false
+  end
+
+  if string.sub(sMsg,1,10)=="#dropshift" then
+    local sVal = string.match(sMsg,"#dropshift *(.*)")
+    if (tonumber(sVal)) then
+      gfDropShift = tonumber(sVal)
+      printToColor("setting dropshift to " .. sVal,sColor)
+    else
+      printToColor(sVal .. " is not a number",sColor)
+    end
+    return false
+  end
+
+
+  if string.sub(sMsg,1,6)=="#sound" then
+    local sVal = string.match(sMsg,"#sound *(.*)")
+    local sSound = string.match(sMsg,"(%d+)")
+    if tonumber(sVal) then
+      giDiscardSound = tonumber(sVal)
+      playDiscardSound()
+      return false
+    else
+      if (sVal=="false") then
+        gbPlaySounds = false
+        return false
+      elseif (sVal=="true") then
+        gbPlaySounds = true
+        playDiscardSound()
+        return false
+      else
+        printToColor("#sound must have a number, true, or false.", sColor)
+        return false
+      end
+    end
+    return false
+  end
+
+  if string.sub(sMsg,1,6)=="#score" then
+    if (string.match(sMsg,"help")) then
+      Player[sColor].print ("#score reset")
+      Player[sColor].print ("#score set <hand> <p1> <p2> <p3> <p4> [<hand> <p1> <p2> <p3> <p4>]* [hand <num>] [first <color>]")
+      Player[sColor].print ("#score hand <hand>")
+      Player[sColor].print ("#score first <color>")
+      Player[sColor].print ("#score copy")
+      return false
+    end
+    if (string.match(sMsg,"reset")) then
+      resetScoresheet()
+      return false
+    end
+    if (string.match(sMsg,"set")) then -- must come after the "reset" search, obviously
+      local sHand, sP1, sP2, sP3, sP4 = string.match(sMsg,"set *(%d+) *(%-?%d+) *(%-?%d+) *(%-?%d*) *(%-?%d*)")
+      debug("sMsg = " .. sMsg .. " / sHand = " .. iif(sHand,sHand,"nil"),"score")
+      local iLoopBreak = 0
+      while (sHand) do
+        debug("looping","score")
+        iLoopBreak = iLoopBreak +1
+        if (iLoopBreak>4) then
+          log("ERROR: Had to Loopbreak out of #score")
+          break
+        end
+        debug("Setting scores.","score")
+        gtScores[1][tonumber(sHand)]=iif(tonumber(sP1),tonumber(sP1),0)
+        gtScores[2][tonumber(sHand)]=iif(tonumber(sP2),tonumber(sP2),0)
+        gtScores[3][tonumber(sHand)]=iif(tonumber(sP3),tonumber(sP3),0)
+        gtScores[4][tonumber(sHand)]=iif(tonumber(sP4),tonumber(sP4),0)
+        sHand = nil
+        debug("Removing 5 numbers.","score")
+        sMsg = string.gsub(sMsg,"( *%-?%d+)","",5)
+        debug("Searching for next scores.","score")
+        sHand, sP1, sP2, sP3, sP4 = string.match(sMsg,"set *(%d+) *(%-?%d+) *(%-?%d+) *(%-?%d*) *(%-?%d*)")
+        debug("sMsg = " .. sMsg .. " / sHand = " .. iif(sHand, sHand,"nil"),"score")
+      end
+      debug("left with sMsg = " .. sMsg .. " / sHand = " .. iif(sHand,sHand,"nil"),"score")
+--      return false
+    end
+
+--    if (string.match(sMsg,"hand")) then
+      local sHand = string.match(sMsg,"hand *(%d+)")
+      debug("Looking for hand and got " .. iif(sHand,sHand,"nil"),"score")
+      if tonumber(sHand) then
+        setHand(tonumber(sHand))
+        printToAll("Current hand is set to " .. sHand)
+        refreshScoresheet()
+      end
+--      return false
+--    end
+
+
+--    if (string.match(sMsg,"first")) then
+      local sClr = string.match(sMsg,"first *(.*)")
+      debug("Looking for color and got " .. iif(sClr,sClr,"nil"),"score")
+      if (sClr) then
+        sColor = sClr:gsub("^%l", string.upper)
+        if Player[sColor]  then
+          gsFirstToGoFirstColor = sColor
+          printToAll(sColor .. " is set as the first to have gone first in this game.")
+          refreshScoresheet()
+        else
+          if sClr then
+            log("Error: trying to set score.first but value not recognized.  cmd= " .. sMsg)
+          end
+        end
+--      return false
+    end
+
+    if (string.match(sMsg,"copy")) then
+      copyScores()
+      printToColor("Scores recorded to Notebook tab", sColor)
+      return false
+    end
+    refreshScoresheet()
+    return false
+  end
+
+  if (string.gsub(message,"%s+","")=="#score") then
+    countScore()
+    return false
+  end
+
+  if (string.gsub(message,"%s+","")=="#init") then
+    mainDeck = initializeGame()
+    return false
+  end
+
+  if (string.gsub(message,"%s+","")=="#deckem") then
+    admin_deckem()
+    return false
+  end
+
+    if (string.gsub(message,"%s+","")=="#sort") then
+      displaySort(sender.color, sender.color, playerStuff[sender.color].sSortMetaOrder)
+      return false
+    end
+    if string.sub(message,1,5)=="#sort" then
+      if (string.match(sMsg,"help")) then
+        Player[sColor].print ("w - WildCards")
+        Player[sColor].print ("3 - all threes")
+        Player[sColor].print ("b - 3+ card sets")
+        Player[sColor].print ("p - pairs")
+        Player[sColor].print ("a - all others")
+        Player[sColor].print ("r - Highest to Lowest")
+        Player[sColor].print ("l - Lowest to Highest")
+        Player[sColor].print ("> - Ace High")
+        Player[sColor].print ("< - Ace Low")
+        Player[sColor].print ("Append with ', <color>' to do for someone else")
+        return false
+      end
+      local sTargetColor = string.match(sMsg,", *(.*)")
+      if (sTargetColor) then
+        sColor = sTargetColor:gsub("^%l", string.upper)
+      end
+      processSortCommand(sColor, sMsg)
+      displaySort(sender.color, sColor, playerStuff[sColor].sSortMetaOrder)
+      return false
+    end
+    return true
+end
+
+function processSortCommand(sColor, sMsg)
+  sMsg = string.gsub(sMsg,"#sort *","")
+  if (sColor) then
+    debug("sColor       : " ..  sColor ,"sort")
+  else
+    debug("sColor is nil?!","sort")
+  end
+  if (sMsg) then
+    debug("sMsg  : " .. sMsg,"sort")
+  else
+    debug("sMsg is nil?!","sort")
+  end
+  local sSortCommand = string.match(sMsg,"[<>wbp3alr]+")
+  debug("sSortComand  : " .. sSortCommand,"sort")
+  if sSortCommand then
+    if (string.match(sSortCommand,">")) then
+      playerStuff[sColor].bSortAceHigh = true
+      debug("Setting sortAceHigh=true","sort")
+    end
+    if (string.match(sSortCommand,"<")) then
+      playerStuff[sColor].bSortAceHigh = false
+      debug("Setting sortAceHigh=false","sort")
+    end
+    if (string.match(sSortCommand,"l")) then
+      playerStuff[sColor].bSortLowLeft = true
+      debug("Setting sortLowLeft=true","sort")
+    end
+    if (string.match(sSortCommand,"r")) then
+      playerStuff[sColor].bSortLowLeft = false
+      debug("Setting sortLowLeft=false","sort")
+    end
+    playerStuff[sColor].sSortMetaOrder=sSortCommand -- string.gsub(sSortCommand,"[<>lr]","")
+    if (not string.find(playerStuff[sColor].sSortMetaOrder,"a")) then
+      playerStuff[sColor].sSortMetaOrder = playerStuff[sColor].sSortMetaOrder .. "a"
+    end
+
+    -- Check for stupid.. remove duplicates and unknown letters
+    local sNew = ""
+    for i=1,string.len(playerStuff[sColor].sSortMetaOrder) do
+      if (not string.find(sNew, string.sub(playerStuff[sColor].sSortMetaOrder,i,i))) then
+        if (string.find(string.sub(playerStuff[sColor].sSortMetaOrder,i,i),"[<>wbp3alr]")) then
+          sNew = sNew .. string.sub(playerStuff[sColor].sSortMetaOrder,i,i)
+        else
+          log("ERROR: unknown string found in sort command: " .. message)
+        end
+      end
+    end
+
+    playerStuff[sColor].sSortMetaOrder = sNew
+    debug("SortMetaOrder  : " .. playerStuff[sColor].sSortMetaOrder,"sort")
+  end
+end
+
+
+function displaySort(sActorColor, sSortColor, sSort)
+  local sSortWords = {
+    ["w"]="wild cards",
+    ["3"]="threes",
+    ["b"]="3+ card sets",
+    ["p"]="pairs",
+    ["a"]="all others",
+    [true]="lowest to highest",
+    [false]="highest to lowest",
+    ["l"]="lowest to highest",
+    ["r"]="highest to lowest",
+    [">"]="Aces High",
+    ["<"]="Aces Low",
+   }
+
+  sReadable = ""
+  debug("SortMetaOrder  : " .. playerStuff[sSortColor].sSortMetaOrder,sort)
+  for i=1,string.len(playerStuff[sSortColor].sSortMetaOrder) do
+      if (sReadable != "") then
+        sReadable = sReadable .. ", "
+      end
+      sReadable = sReadable .. sSortWords[string.sub(playerStuff[sSortColor].sSortMetaOrder,i,i)]
+  end
+  if (sSortColor != sActorColor) then
+    Player[sSortColor].print("The " .. sActorColor .. " player has changed your sorting." )
+    Player[sActorColor].print("The " .. sSortColor .. " player's sorting is " .. sReadable .. " (" .. playerStuff[sSortColor].sSortMetaOrder .. ")." )
+    Player[sActorColor].print("Within each set, the cards will be sorted from " .. sSortWords[playerStuff[sSortColor].bSortLowLeft] .. "." )
+  end
+  Player[sSortColor].print("Your sorting is set to " .. sReadable .. " (" .. playerStuff[sSortColor].sSortMetaOrder .. ")." )
+--  Player[sSortColor].print("Within each set, the cards will be sorted from " .. sSortWords[playerStuff[sSortColor].bSortLowLeft] .. "." )
+end
+
+function printTab(stitle, tab, grp)
+  if grp then
+    if (gtDebugFlags[grp]) then
+      print ("Table = " .. stitle)
+      for index, data in ipairs(tab) do
+          print(index)
+          s = ""
+          for key, value in pairs(data) do
+              s = s .. "(" ..  key .. ") " .. tostring(value) .. ", "
+          end
+          print (s)
+      end
+    end
+  else
+    -- log(str)
+  end
+
+end
+
+-- Sort the calling player's hand.
+function sortHand(obj, player_color)
+	-- Table to store the sortable list of cards present in the hand.
+	local cards = {}
+	-- Table to store the list of card positions in the hand.
+	local handPos = {}
+	-- Grab the list of cards in the hand.  We'll use this to populate our tables.
+	handObjects = Player[player_color].getHandObjects()
+	-- Flag to indicate whether the error handling routine found an improperly named card.
+	ErrorMode = 0
+
+	-- Populate both tables.
+	for i, j in pairs(handObjects) do
+
+    _, cardNumber, cardSuit = cardDeets(j)
+
+--		local cardNumber = j.getName()
+--		local cardSuit = j.getDescription()
+
+		-- Error Handling
+		if cardNumber == '' or (groupSuitMode != 0 and cardSuit == '') then
+			broadcastToColor("[00ff00]Sort Hand Tool[-]: Card missing name or needed description.", player_color, {1,1,1})
+			debug(j, 'Card with missing name or needed description:',"sort")
+			ErrorMode = 1
+			return
+		end
+
+		table.insert(cards, {j, j.getName(), cardNumber, cardSuit})
+		table.insert(handPos, j.getPosition())
+
+	end
+
+	if ErrorMode == 1 then
+		return
+	end
+
+  setSortOrder(playerStuff[player_color].bSortLowLeft, playerStuff[player_color].bSortAceHigh)
+
+	-- Sort the list of cards.
+	table.sort(cards, sortLogic)
+
+  bGroupWilds   = not (string.find(playerStuff[player_color].sSortMetaOrder,"w")==nil)
+  bGroupBooks   = not (string.find(playerStuff[player_color].sSortMetaOrder,"b")==nil)
+  bGroupPairs   = not (string.find(playerStuff[player_color].sSortMetaOrder,"p")==nil)
+  bGroupAllOthers = not (string.find(playerStuff[player_color].sSortMetaOrder,"[a]")==nil)
+  bGroupThrees  = not (string.find(playerStuff[player_color].sSortMetaOrder,"[3]")==nil)
+  tableWild={}
+  tableBooks={}
+  tablePairs={}
+  tableAllOthers={}
+  tableThrees={}
+
+  iStart = 1
+  iEnd = iStart
+  sLastCard=""
+  printTab("cards",cards,"sort")
+  for i, j in ipairs(cards) do
+     debug("lastcard is " .. sLastCard .. " this card is " .. j[3] .. j[4], "sort")
+     if (sLastCard=="" or  j[3]==sLastCard or (sLastCard=="Wild" and (j[3]=="2"  or j[3]=="Joker"))) then
+       iEnd=i
+       if(j[3]=="2" or j[3]=="Joker") then
+         sLastCard="Wild"
+       else
+         sLastCard=j[3]
+       end
+     else
+       metaGroupCards(iStart, iEnd, sLastCard, cards)
+        iStart=i
+        iEnd=iStart
+        if(j[3]=="2" or j[3]=="Joker") then
+          sLastCard="Wild"
+        else
+          sLastCard=j[3]
+        end
+     end
+	end
+  if (sLastCard != "") then
+    metaGroupCards(iStart, iEnd, sLastCard, cards)
+  end
+  debug("Sorting Based on " .. playerStuff[player_color].sSortMetaOrder , "sort")
+  cards = {}
+  for m = 1,string.len(playerStuff[player_color].sSortMetaOrder) do
+      sChar = string.sub(playerStuff[player_color].sSortMetaOrder,m,m)
+      if (sChar=="w") then
+        printTab("Wild", tableWild,"sort")
+        TableConcat(cards,tableWild)
+      elseif (sChar=="b") then
+        printTab("Books", tableBooks,"sort")
+        TableConcat(cards,tableBooks)
+      elseif (sChar=="p") then
+        printTab("Pairs", tablePairs,"sort")
+        TableConcat(cards,tablePairs)
+      elseif (sChar=="a") then
+        printTab("AllOthers" , tableAllOthers,"sort")
+        TableConcat(cards,tableAllOthers)
+      elseif (sChar=="3") then
+        printTab("Threes", tableThrees,"sort")
+        TableConcat(cards,tableThrees)
+      end
+  end
+
+
+	-- Take the sorted list of cards and apply the list of card positions in order to physically rearrange them.
+	for i, j in ipairs(cards) do
+		j[1].setPosition(handPos[i])
+	end
+end
+
+function TableConcat(t1,t2)
+    for i=1,#t2 do
+        t1[#t1+1] = t2[i]
+    end
+    return t1
+end
+
+function metaGroupCards(iStart, iEnd, sLastCard, cards)
+  debug("Storing .." .. iEnd+1-iStart .. " ".. sLastCard, "sort")
+  local m = 0
+  if (bGroupWilds and sLastCard=="Wild") then
+    for m = iStart, iEnd do
+      table.insert(tableWild,cards[m])
+    end
+  elseif (bGroupThrees and sLastCard=="3") then
+    for m = iStart, iEnd do
+      table.insert(tableThrees,cards[m])
+    end
+  elseif (bGroupBooks and iEnd+1-iStart>2) then
+    for m = iStart, iEnd do
+      table.insert(tableBooks,cards[m])
+    end
+  elseif (bGroupPairs and iEnd+1-iStart==2) then
+    for m = iStart, iEnd do
+      table.insert(tablePairs,cards[m])
+    end
+  else
+    for m = iStart, iEnd do
+      table.insert(tableAllOthers,cards[m])
+    end
+  end
+end
+
+-- Comparison function used by table.sort()
+-- The parameters supplied by table.sort() are tables, where parameter[1] is the object reference, and parameter[2] is the object Name.
+function sortLogic(card1, card2)
+
+	-- Grab the relevant information for both cards.
+  _, card1Number,card1Suit = cardDeets(card1[1])
+  --	card1Number = card1[1].getName()
+  debug("looking for *" .. card1Number .. "*" .. card1Suit .. "*","decksort")
+  debug("len=" .. #refCardOrderIndex,"decksort")
+	card1NumberIndex = refCardOrderIndex[card1Number]
+  --	card1Suit = card1[1].getDescription()
+	card1SuitIndex = refSuitOrderIndex[card1Suit]
+  debug("C1NI=" .. card1NumberIndex,"decksort")
+  debug("C1SI=" .. card1SuitIndex,"decksort")
+
+  _, card2Number, card2Suit = cardDeets(card2[1])
+--	card2Number = card2[1].getName()
+	card2NumberIndex = refCardOrderIndex[card2Number]
+--	card2Suit = card2[1].getDescription()
+	card2SuitIndex = refSuitOrderIndex[card2Suit]
+
+
+	-- log(card1Number, 'card1Number:')
+	-- log(card1NumberIndex, 'card1NumberIndex:')
+	-- log(card1Suit, 'card1Suit:')
+	-- log(card1SuitIndex, 'card1SuitIndex:')
+
+  groupSuitMode = 2
+
+	-- 0: Ignore all suits.
+	if groupSuitMode == 0 then
+		return card1NumberIndex < card2NumberIndex
+	end
+
+	-- 1: All suits are together
+	if groupSuitMode == 1 then
+		if card1Suit == card2Suit then
+			return card1NumberIndex < card2NumberIndex
+		else
+			return card1SuitIndex < card2SuitIndex
+		end
+	end
+
+	-- 2: All card numbers are together
+	if groupSuitMode == 2 then
+		if card1Number == card2Number then
+			return card1SuitIndex < card2SuitIndex
+		else
+			return card1NumberIndex < card2NumberIndex
+		end
+	end
+end
+
+
+-- Function to determine whether a specified value/object exists in a table.
+function tableContains(tableSpecified, element)
+	for _, value in pairs(tableSpecified) do
+		if value == element then
+			return true
+		end
+	end
+	return false
+end

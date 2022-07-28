@@ -1,0 +1,127 @@
+<!-- Xml UI. See documentation: https://api.tabletopsimulator.com/ui/introUI/ -->
+<Defaults>
+  <Panel class="WindowBorder" color="#8F8478" outline="#635351" outlineSize="2 -2" />
+  <Panel class="SubPanel" color="#8F8478" outline="#635351" outlineSize="2 -2" />
+    <Row class="MenuBar" color="#FFFFFF" />
+    <Button class="topButtons" width="25" height="25" rectAlignment="UpperLeft" color="#eeeeee" offsetXY="-3 -3" />
+    <Button class="recButton" width="65" height="25" rectAlignment="UpperLeft" color="#eeeeee" offsetXY="-375 -3" />
+    <Text class="UIText" fontSize="18" fontStyle="Normal" color="#000000" />
+    <TableLayout class="ScoreTable" width="440" columnWidths="0 50 50 50 50 60" height="150" rectAlignment="UpperRight" offsetXY="-5 -10" cellPadding="5" color="#FFFFFF" />
+    <Cell class="cell" />
+    <Row class="ScoreTableRow" preferredHeight="30" />
+    <InputField class="UIInputField" width="50" height="50" fontSize="14" fontStyle="Bold" colors="#FFFFFF|#dddddd|#FFFFFF|rgba(0.78,0.78,0.78,0.5)" />
+    <Button class="PMButton" width="10" height="10" rectAlignment="MiddleCenter" color="rgba(1,1,1,0)" />
+    <Button class="FAB" height="30" width="50" color="rgba(1,1,1,0)" />
+</Defaults>
+<Panel id="ScoreSheetPanel" class="WindowBorder" width="450" height="30" rectAlignment="UpperRight" showAnimation="Grow" hideAnimation="Shrink" returnToOriginalPositionWhenReleased="false" allowDragging="true" color="#bbbbbb00">
+    <Row id="MenuBar" class="MenuBar" width="450">
+        <Text id="WindowTitle" text="Score Sheet" class="UIText" rectAlignment="UpperCenter" alignment="LowerCenter" width="230" height="80" offsetXY="0 55" />
+        <Button id="recordButton" class="recButton" rectAlignment="UpperRight" color="#990000" textColor="#FFFFFF" text="Record" onClick="recordScores" />
+        <Button id="closeButton" class="topButtons" rectAlignment="UpperRight" color="#990000" textColor="#FFFFFF" text="^" onClick="ClosePanel" />
+    </Row>
+    <Panel id="SubPanel" class="SubPanel" width="450" height="175" rectAlignment="UpperRight" showAnimation="Grow" hideAnimation="Shrink" returnToOriginalPositionWhenReleased="false" xallowDragging="true" color="#bbbbbb" offsetXY="0 -30">
+      <TableLayout id="ScoreTable" class="ScoreTable" >
+          <Row class="ScoreTableRow" dontUseTableRowBackground="true" color="#0089EA">
+            <Cell class="cell">
+                <Text id="Plyr" text="Player" />
+            </Cell>
+            <Cell>
+                <Text id="R1" text="1" />
+            </Cell>
+            <Cell>
+                <Text id="R2" text="2" />
+            </Cell>
+            <Cell>
+                <Text id="R3" text="3" />
+            </Cell>
+            <Cell>
+                <Text id="R4" text="4" />
+            </Cell>
+            <Cell>
+                <Text id="TOTAL" text="Total" />
+            </Cell>
+          </Row>
+          <Row id="ScoreRow1" class="ScoreTableRow">
+              <Cell>
+                  <Text id="Player1" text="Player 1"></Text>
+              </Cell>
+              <Cell>
+                  <Text id="P1R1Score"></Text>
+              </Cell>
+              <Cell>
+                  <Text id="P1R2Score"></Text>
+              </Cell>
+              <Cell>
+                  <Text id="P1R3Score"></Text>
+              </Cell>
+              <Cell>
+                  <Text id="P1R4Score"></Text>
+              </Cell>
+              <Cell>
+                  <Text id="P1R5Score"></Text>
+              </Cell>
+          </Row>
+          <Row id="ScoreRow2" class="ScoreTableRow">
+              <Cell>
+                  <Text id="Player2" text="Player 2"></Text>
+              </Cell>
+              <Cell>
+                  <Text id="P2R1Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P2R2Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P2R3Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P2R4Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P2R5Score"> </Text>
+              </Cell>
+          </Row>
+          <Row id="ScoreRow3" class="ScoreTableRow">
+              <Cell>
+                  <Text id="Player3" text="Player 3"></Text>
+              </Cell>
+              <Cell>
+                  <Text id="P3R1Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P3R2Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P3R3Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P3R4Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P3R5Score"> </Text>
+              </Cell>
+          </Row>
+          <Row id="ScoreRow4" class="ScoreTableRow">
+              <Cell>
+                  <Text id="Player4" text="Player 4">Player 4</Text>
+              </Cell>
+              <Cell>
+                  <Text id="P4R1Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P4R2Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P4R3Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P4R4Score"> </Text>
+              </Cell>
+              <Cell>
+                  <Text id="P4R5Score"> </Text>
+              </Cell>
+          </Row>
+      </TableLayout>
+      <Image id="GoesFirst" active="false" image="GoesFirstOrangeBorder" height="25" width="25" rectAlignment="UpperLeft" offsetXY="-5 0" />
+    </Panel>
+</Panel>
