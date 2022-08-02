@@ -13,6 +13,11 @@ gi_RED_BOOK_SCORE = 500
 gi_BLACK_BOOK_SCORE = 300
 gi_WILD_BOOK_SCORE = 1500
 
+gLEFT  = 0
+gRIGHT = 1
+gUP    = 2
+gDOWN  = 3
+
 -- Globals -------------------------------------------------------------------------
 -- Values that are set globally and expected to change over time
 gbPlaySounds=false          -- admin boolean to play sounccube sounds or not (generally not when using turns)
@@ -44,8 +49,8 @@ gfDropShift = .5
 gtDebugFlags={
 --          ["dropped"]=1,
 --["spread"]=1,
-layoutsel=1,
---["getowner"]=1,
+--layoutsel=1,
+["decal"]=1,
 --["getallscorezones"]=1,
 --          ["weird"]=1,
 --          ["buttons"]=1,
@@ -514,6 +519,7 @@ function dealDeck(oMainDeck)
   end
   setPlayers(playerList)
   setButtons()
+  setCardDecal()
   text_score_white.TextTool.setValue(" ")
   text_score_blue.TextTool.setValue(" ")
   text_score_green.TextTool.setValue(" ")
@@ -1281,6 +1287,7 @@ soundCube = getObjectFromGUID(SOUND_CUBE)
 
   addHotkey("Toggle Scoring", function (playerColor, object, pointerPosition, isKeyUp)
     if (isKeyUp) then
+      setCardDecal()
       click_ToggleScoring(_, playerColor)
       --objTable.call("updateSurfaceByURL","seconddb.com/GreenFeltFullSquare2pv2.png")
       --tb.call("click_loadMemory_wrapper", {1, "White", 3})
@@ -1406,6 +1413,94 @@ function fixBooks()
   end
 end
 
+
+-- =============================================================================
+function moveRelative(vToMove, fDist, iDir, fYRot)
+  if (iDir == gLEFT) then
+    vToMove.x = vToMove.x - fDist*math.cos(math.rad(fYRot))
+    vToMove.z = vToMove.z + fDist*math.sin(math.rad(fYRot))
+  elseif (iDir == gRIGHT) then
+    vToMove.x = vToMove.x + fDist*math.cos(math.rad(fYRot))
+    vToMove.z = vToMove.z - fDist*math.sin(math.rad(fYRot))
+  elseif (iDir == gUP) then
+    vToMove.x = vToMove.x + fDist*math.sin(math.rad(fYRot))
+    vToMove.z = vToMove.z + fDist*math.cos(math.rad(fYRot))
+  elseif (iDir == gDOWN) then
+    vToMove.x = vToMove.x - fDist*math.sin(math.rad(fYRot))
+    vToMove.z = vToMove.z - fDist*math.cos(math.rad(fYRot))
+  else
+    log ("Error, dir not understood (" .. iDir .. ")")
+  end
+  return vToMove
+end
+
+-- =============================================================================
+function setCardDecal()
+  local fSpreadBetweenCards = .25
+  local fScoreGapBetweenCards = .3
+  local fRelativeShrinkageFactor = 0.45
+  local fVertOffset = .6/fRelativeShrinkageFactor/10 --0.2
+  fSpreadBetweenCards = fRelativeShrinkageFactor/1.3
+  local vDecalScale = {x=.8,y=1,z=1}
+--  local vDecalScale = {x=1,y=1,z=1}
+
+   vDecalScale = {vDecalScale.x*fRelativeShrinkageFactor,
+                 vDecalScale.y*fRelativeShrinkageFactor,
+                 vDecalScale.z*fRelativeShrinkageFactor, }
+
+  local oSurface = getObjectFromGUID(UI_TABLETOP_SURFACE)
+  local vSurScale = oSurface.getScale()
+  -- Clear all decals
+  oSurface.setDecals({})
+  local _, tBookCount = countScoreInternal()
+  local lplayerList = getSeatedPlayers()
+  for i,sColor in ipairs(lplayerList) do
+    debug("doing " .. sColor, "decal")
+    local vCenter = obj_scoretext[sColor].getPosition()-oSurface.getPosition()
+    debug("scorepos = " .. dump(obj_scoretext[sColor].getPosition()),"decal" )
+    debug("surface  = " .. dump(oSurface.getPosition()),"decal" )
+    debug("vCenter  = " .. dump(vCenter),"decal")
+
+    vCenter.x = vCenter.x / vSurScale.x
+    vCenter.z = vCenter.z / vSurScale.z
+    local vRot = obj_Zone[sColor].getRotation()
+    vRot.x = 90
+    vRot.y = vRot.y + 180
+    local vNewPos = shallowCopy(vCenter);
+    vNewPos = moveRelative(vNewPos, fScoreGapBetweenCards, gLEFT, nearestRightAngle(vRot.y) )
+    vNewPos = moveRelative(vNewPos, fVertOffset, gDOWN, nearestRightAngle(vRot.y) )
+
+    for i=1,tBookCount[sColor][gi_RED_BOOK_SCORE] do
+      vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gLEFT, nearestRightAngle(vRot.y) )
+      vNewPos.y = 10.5
+      debug("Putting Heart at " .. dump(vNewPos) .. " for " .. sColor,"decal");
+      local params = {
+        name     = "HeartCard",
+        url      = "http://cloud-3.steamusercontent.com/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/",
+        position = vNewPos,
+        rotation = vRot,
+        scale    = vDecalScale,
+      }
+      oSurface.addDecal(params)
+    end
+    vNewPos = shallowCopy(vCenter);
+    vNewPos = moveRelative(vNewPos, fScoreGapBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
+    vNewPos = moveRelative(vNewPos, fVertOffset, gDOWN, nearestRightAngle(vRot.y) )
+    for i=1,tBookCount[sColor][gi_BLACK_BOOK_SCORE] do
+      vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
+      vNewPos.y = 10.5
+      debug("Putting Spade at " .. dump(vNewPos) .. " scale:".. dump(vDecalScale) .. " for " .. sColor,"decal");
+      local params = {
+        name     = "SpadeCard",
+        url      = "http://cloud-3.steamusercontent.com/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/",
+        position = vNewPos,
+        rotation = vRot,
+        scale    = vDecalScale,
+      }
+      oSurface.addDecal(params)
+    end
+  end
+end
 -- =============================================================================
 function admin_sinkWalls()
   for i, oWallProps in pairs(objScoreZones[2]["Walls"]) do
@@ -1460,7 +1555,7 @@ function countScore()
   if (bRunScoring) then
     local scores = countScoreInternal()
     for sColor, iScore in pairs(scores) do
-      obj_scoretext[sColor].TextTool.setValue(" " .. iScore)
+      obj_scoretext[sColor].TextTool.setValue("" .. iScore)
     end
   end
   if (bRunScoring) then
@@ -1942,7 +2037,11 @@ function notNill(thing)
   end
 end
 
-
+function nearestRightAngle(fSourceRotY)
+  local fY = 90*( math.floor((fSourceRotY+45)/90))
+  fY = (fY)%360
+  return fY
+end
 -- =============================================================================
 function changeRelativePosition(vOrigPos, vRot, bLeftRight)
   local vNewPos = vOrigPos
@@ -2288,6 +2387,7 @@ function spread4(player, desiredPos, tCards)
               spinnableCards[sOrder].setRotation(rot90)
             end
           end
+          Wait.time( function() setCardDecal(); end, 1.0)
 
       -- if we're neither near-bookable 6 cards or stackable 7+ cards, Then
       -- we just need to plunk all the spinnable cards down at the bottom
@@ -3932,6 +4032,7 @@ function onObjectDrop(player_color, dropped_object)
           Turns.turn_color=Turns.getNextTurnColor()
         end
         announceAll(name .. " discarded ")
+        setCardDecal()
         checkFootNote(player_color)
         playDiscardSound()
       end
