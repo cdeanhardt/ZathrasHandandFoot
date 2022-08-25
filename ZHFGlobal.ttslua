@@ -12,7 +12,7 @@ gt_PLAYER_COLOR_BY_NUM={[1]="White",[2]="Green",[3]="Blue",[4]="Red"}        -- 
 gi_RED_BOOK_SCORE = 500
 gi_BLACK_BOOK_SCORE = 300
 gi_WILD_BOOK_SCORE = 1500
-
+gbHandWonPause = false
 gLEFT  = 0
 gRIGHT = 1
 gUP    = 2
@@ -20,6 +20,7 @@ gDOWN  = 3
 
 -- Globals -------------------------------------------------------------------------
 -- Values that are set globally and expected to change over time
+gbFinishFlag = false        -- a temporary state boolean declaring whether the FinishFlag should be presented
 gbPlaySounds=false          -- admin boolean to play sounccube sounds or not (generally not when using turns)
 giDiscardSound = 9          -- if playing sounds, use this one for a discard
 gbShowDirButtons=false      -- whether to display the x/z buttons useful for debugging orientation
@@ -50,7 +51,8 @@ gtDebugFlags={
 --          ["dropped"]=1,
 --["spread"]=1,
 --layoutsel=1,
-["decal"]=1,
+--["decal"]=1,
+--  vertical2=1,
 --["getallscorezones"]=1,
 --          ["weird"]=1,
 --          ["buttons"]=1,
@@ -193,7 +195,13 @@ function dump(o)
         if (tonumber(o)) then
           o = round(tonumber(o),2)
         end
-        return tostring(o)
+        if (type(o) == 'userdata'
+            and o.tag
+            and o.tag=="Card") then
+          return "card: " .. o.getDescription()
+        else
+          return tostring(o)
+        end
     end
 end
 ----
@@ -768,6 +776,8 @@ function initializeHand()
   maindeck.shuffle()
   maindeck.shuffle()
   Wait.time(function () maindeck.shuffle() end, 0.5 ,5)  -- a little delay, just to make it last longer.. still just cosmetic after the first
+  Wait.time(function () setCardDecal() end, 0.5 ,5)
+
   return maindeck
 end
 
@@ -803,24 +813,31 @@ end
 
 
 function onLoad(saved_data)
---  --Load Data
-  if saved_data ~= "" then
-    debug("Loading saved data!","loaded")
-    debug(saved_data,"loaded")
-    local loaded_data = JSON.decode(saved_data)
-    --Set Global Variables
-    gtScores        = loaded_data.scores
-    gsFirstToGoFirstColor = loaded_data.f2gfc
-  end
+  --  --Load Data
+    if saved_data ~= "" then
+      debug("Loading saved data!","loaded")
+      debug(saved_data,"loaded")
+      local loaded_data = JSON.decode(saved_data)
+      --Set Global Variables
+      gtScores        = loaded_data.scores
+      gsFirstToGoFirstColor = loaded_data.f2gfc
+    end
 
---  SOUND_CUBE = '8d1d25'
-debug("loaded-----------", "loaded")
-log("Loaded")
-log("+++++++++++++++++++++++++++++++++++++++++++++++++")
-log("*************************************************")
-log("*************************************************")
-SOUND_CUBE = 'a98418' -- This is the new sound cube
-soundCube = getObjectFromGUID(SOUND_CUBE)
+  for _, oThing in pairs(self.getObjects()) do
+    if oThing.tag == 'Deck'
+        and oThing.getQuantity()>200 then
+      mainDeck = oThing
+      break
+    end
+  end
+  --  SOUND_CUBE = '8d1d25'
+  debug("loaded-----------", "loaded")
+  log("Loaded")
+  log("+++++++++++++++++++++++++++++++++++++++++++++++++")
+  log("*************************************************")
+  log("*************************************************")
+  SOUND_CUBE = 'a98418' -- This is the new sound cube
+  soundCube = getObjectFromGUID(SOUND_CUBE)
 
   FOOTNOTE_TEXT_WHITE = '342071'
   FOOTNOTE_TEXT_BLUE = '6def21'
@@ -1202,7 +1219,7 @@ soundCube = getObjectFromGUID(SOUND_CUBE)
   gbDealing = false
   fromdeck={}
   fromdiscard={}
-  mainDeck = getObjectFromGUID(UI_CENTER_DECK);
+  --mainDeck = getObjectFromGUID(UI_CENTER_DECK);
   giCaliforniaRules = 0
   giNorthCarolinaRules = 1
   giNumRuleSets=2
@@ -1278,12 +1295,18 @@ soundCube = getObjectFromGUID(SOUND_CUBE)
 
 --  end
 
-  addHotkey("Fix Books", function (playerColor, object, pointerPosition, isKeyUp)
-    if (isKeyUp) then
-      fixBooks()
-      Player[playerColor].print("Fix Books", {r=0, g=1, b=1})
-    end
-  end, true)
+addHotkey("Fix Books", function (playerColor, object, pointerPosition, isKeyUp)
+  if (isKeyUp) then
+    fixBooks()
+    Player[playerColor].print("Fix Books", {r=0, g=1, b=1})
+  end
+end, true)
+
+addHotkey("Dev Trigger", function (playerColor, object, pointerPosition, isKeyUp)
+  if (isKeyUp) then
+    finishFlag()
+  end
+end, true)
 
   addHotkey("Toggle Scoring", function (playerColor, object, pointerPosition, isKeyUp)
     if (isKeyUp) then
@@ -1331,8 +1354,12 @@ end, true)
       if mainDeck then
 --        mainDeck.deal(1,playerColor)
 --        mainDeck.deal(1,playerColor)
-        mainDeck.deal(1,playerColor)
-        Wait.time(function() mainDeck.deal(1,playerColor) end, 0.25)
+        if (not gbHandWonPause) then
+          mainDeck.deal(1,playerColor)
+          Wait.time(function() mainDeck.deal(1,playerColor) end, 0.25)
+        else
+          broadcastToColor("Drawing temporarily disabled.\nWas there a winner?", playerColor, "Yellow" )
+        end
       end
     end
   end, true)
@@ -1346,7 +1373,11 @@ end, true)
       if mainDeck then
 --        mainDeck.deal(1,playerColor)
 --        mainDeck.deal(1,playerColor)
+        if (not gbHandWonPause) then
         mainDeck.deal(1,playerColor)
+        else
+          broadcastToColor("Drawing temporarily disabled.\nWas there a winner?", playerColor, "Yellow" )
+        end
       end
     end
   end, true)
@@ -1414,6 +1445,7 @@ function fixBooks()
 end
 
 
+
 -- =============================================================================
 function moveRelative(vToMove, fDist, iDir, fYRot)
   if (iDir == gLEFT) then
@@ -1434,10 +1466,29 @@ function moveRelative(vToMove, fDist, iDir, fYRot)
   return vToMove
 end
 
+
+-- =============================================================================
+function finishFlag()
+  log("flagging")
+  gbFinishFlag = true
+  local oSurface = getObjectFromGUID(UI_TABLETOP_SURFACE)
+  local params = {
+    name     = "FinishFlag2",
+--    url      = "http://cloud-3.steamusercontent.com/ugc/1877457015605612653/49761BB03C0CFFB4A8DB96C806666BBB4A01AEEF/",
+    --url      = "http://cloud-3.steamusercontent.com/ugc/1877457015605751193/879FF1D984080D65C9AA792BBC1F978D916E085A/",
+    url      = "http://cloud-3.steamusercontent.com/ugc/1743476829258119278/0155E19E26C55460DBCBDC3389717EEF77444FC2/",
+    position = {0,10.49,0.05},
+    rotation = {90,0,0},
+    scale    = {5.25,4.2,1},
+  }
+  oSurface.addDecal(params)
+end
+
 -- =============================================================================
 function setCardDecal()
   local fSpreadBetweenCards = .25
   local fScoreGapBetweenCards = .3
+  local fCardHeight=10.75
   local fRelativeShrinkageFactor = 0.45
   local fVertOffset = .6/fRelativeShrinkageFactor/10 --0.2
   fSpreadBetweenCards = fRelativeShrinkageFactor/1.3
@@ -1452,6 +1503,12 @@ function setCardDecal()
   local vSurScale = oSurface.getScale()
   -- Clear all decals
   oSurface.setDecals({})
+
+  if gbFinishFlag then
+    finishFlag()
+  end
+
+
   local _, tBookCount = countScoreInternal()
   local lplayerList = getSeatedPlayers()
   for i,sColor in ipairs(lplayerList) do
@@ -1472,7 +1529,7 @@ function setCardDecal()
 
     for i=1,tBookCount[sColor][gi_RED_BOOK_SCORE] do
       vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gLEFT, nearestRightAngle(vRot.y) )
-      vNewPos.y = 10.5
+      vNewPos.y = fCardHeight
       debug("Putting Heart at " .. dump(vNewPos) .. " for " .. sColor,"decal");
       local params = {
         name     = "HeartCard",
@@ -1488,11 +1545,26 @@ function setCardDecal()
     vNewPos = moveRelative(vNewPos, fVertOffset, gDOWN, nearestRightAngle(vRot.y) )
     for i=1,tBookCount[sColor][gi_BLACK_BOOK_SCORE] do
       vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
-      vNewPos.y = 10.5
+      vNewPos.y = fCardHeight
       debug("Putting Spade at " .. dump(vNewPos) .. " scale:".. dump(vDecalScale) .. " for " .. sColor,"decal");
       local params = {
         name     = "SpadeCard",
         url      = "http://cloud-3.steamusercontent.com/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/",
+        position = vNewPos,
+        rotation = vRot,
+        scale    = vDecalScale,
+      }
+      oSurface.addDecal(params)
+    end
+    vNewPos = moveRelative(vNewPos, fSpreadBetweenCards*.5, gRIGHT, nearestRightAngle(vRot.y) )
+    for i=1,tBookCount[sColor][gi_WILD_BOOK_SCORE] do
+      vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
+      vNewPos.y = fCardHeight
+      debug("Putting Wild at " .. dump(vNewPos) .. " scale:".. dump(vDecalScale) .. " for " .. sColor,"decal");
+      local params = {
+        name     = "WildCard2",
+--        url      = "http://cloud-3.steamusercontent.com/ugc/1877457015608170745/6DBE94CFF96CCA92FFCD2AD6F7F0409A85DA1347/",
+        url      = "http://cloud-3.steamusercontent.com/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
         position = vNewPos,
         rotation = vRot,
         scale    = vDecalScale,
@@ -1975,7 +2047,7 @@ function findProximity(targetPos, object)
 end
 
 
-
+--==============================================================================
 function cardDeets(oneCard)
   local shortSuit
   local shortName
@@ -1994,9 +2066,9 @@ function cardDeets(oneCard)
     return "Red", shortName, shortSuit
   end
 end
-
+--==============================================================================
 function tablepush(tab, el)
-  debug("table push " .. el, "discard")
+  debug("table push " .. dump(el), "discard")
   local i = tablefind(tab, el)
   if i==-1  then
     table.insert(tab, el)
@@ -2007,10 +2079,10 @@ function tablepop(tab, el)
   local i = tablefind(tab, el)
   if (i>-1) then
     table.remove(tab,i)
-    debug("table pop-t " .. el, "discard")
+    debug("table pop-t " .. dump(el), "discard")
     return true
   end
-  debug("table pop-f " .. el, "discard")
+  debug("table pop-f " .. dump(el), "discard")
 return false
 end
 
@@ -2147,8 +2219,6 @@ function spread4(player, desiredPos, tCards)
       if (shortColor=="Wild") then
         iNumWild=iNumWild+1
       end
-
-      -- ---------------------------------------------------------------
       -- if the current card isn't wild, let's see about marking the
       -- spread with a specific cardtype
       if (shortColor != "Wild")  then
@@ -2196,6 +2266,7 @@ function spread4(player, desiredPos, tCards)
 
     -- get selected objects (or the cards sent in) and call it "the selection (sel)"
     if (not tCards) then
+      debug("** Had to get player selection instead of tCards!!!","prob2")
       tCards = Player[player].getSelectedObjects()
     end
 
@@ -2214,22 +2285,22 @@ function spread4(player, desiredPos, tCards)
       -- Sort the cards to find the one closest to the center of the table (0,0,0)
       table.sort(tCards, function(a,b) return findProximity({x=0,y=0,z=0},a) < findProximity({x=0,y=0,z=0},b) end)
 
-      -- take the position of the first card (nearest to table center) and make it
-      -- the start of the stack by capturing its position\
-      posLast = tCards[1].getPosition()
-
       -- if, instead, we were told where to put it, let's use that.
       -- this really means the sort and posLast=getpos above were useless
       -- good programming says to avoid them as unnecessary.  I'm not
       -- a good programmer
       if (desiredPos) then
         posLast = desiredPos
+      else
+        -- take the position of the first card (nearest to table center) and make it
+        -- the start of the stack by capturing its position\
+        posLast = tCards[1].getPosition()
       end
 
       -- Figure out the rotation to use for most of the cards
       -- as a baseline, let's start with the rotation of the first
       -- card in the set
-      rot = tCards[1].getRotation()
+--      rot = tCards[1].getRotation()
 
       -- Find out whose zone it's in.  Take the first selection as the
       -- deciding factor
@@ -2279,7 +2350,7 @@ function spread4(player, desiredPos, tCards)
         -- as bAlign is negative (false), 1 (high) or 3 (low)
         -- then subtract 2 making -1 high and 1 low.
         -- we lose "false" generally, but don't care now, we just checked
-        posLast = nearMe(posLast, rot, tCards, playerStuff[player].bAlign-2)
+        posLast = nearMe(posLast, rot, tCards, playerStuff[player].bAlign-2, player)
       end
 
       -- We need to keep record of the top spot, even after we've moved
@@ -2839,6 +2910,9 @@ function spread3x(spread, player, rottype, desiredPos, tCards)
 
 end
 
+
+
+
 function addRelativePos(sDir, vPos, vRot, fDelta)
   local vOut = vPos
   if (gt_DECODE_DIR[vRot.y][1]=="x") then
@@ -2924,11 +2998,219 @@ end
 --   return tSelectionToSpread
 -- end
 
+
+function getDir(sDir, fRotY)
+  local iVert=iif(sDir=="up",1, iif(sDir=="down",-1,0))
+  local iHoriz=iif(sDir=="left",1, iif(sDir=="right",-1,0))
+  debug("GetDir " .. dump(sDir) .. ", " .. dump(fRotY) .. ", " .. dump(iVert) .. ", " .. dump(iHoriz),"vertical")
+
+  local vRet = {
+             x = iVert*math.sin(math.rad(fRotY))    + iHoriz*math.cos(math.rad(fRotY)),
+             y = 0,
+             z = iVert*-1*math.cos(math.rad(fRotY)) + iHoriz*math.sin(math.rad(fRotY))
+           }
+  return vRet
+end
+
+
+function getCardsInMyVertical3(oCard, vRot, sColor, tOrigSelObjects, tAlreadyAccountedForObjs, vPos, sDir, alreadyCheckedGUIDs)
+  local bFoundDifferentCard = false
+  local tSelectionToSpread = {}
+  local fCardPadding = 0.2
+  local fDiscoveryDistance=gv_CARD_SIZE.x*0.5;
+
+  local iWildCount = 0;
+
+  if (not alreadyCheckedGUIDs) then
+    alreadyCheckedGUIDs = {}
+  end
+
+  -- detect a small rectange, extending to either side the width of a card turned on
+  -- it's side (so the long side, plus the padding between cards,plus a tiny bit more to hit the card
+  local detectorSize = { gv_CARD_SIZE.z*.75, 2.0, gv_CARD_SIZE.x/10}
+
+  vRot, sColor = getPlayerRotationFromObject(oCard)
+
+  debug("getCardsInMyVertical3 called.. sdir=" .. nvl(sDir),"vertical")
+
+  local aDir = {}
+  if not sDir then
+    aDir["up"]=getDir("up",vRot.y)
+    aDir["down"]=getDir("down",vRot.y)
+  else
+    aDir[sDir]=getDir(sDir,vRot.y)
+  end
+
+  if (not vPos) then
+    vPos = oCard.getPosition()
+  end
+  local firstNonWild = nil
+  local iWildCount = 0;
+
+  for sWorkingDir, vDir in pairs(aDir) do
+    -- if we're not given a direction, then we're not in a recursive calls
+    -- and we reset giLoopStop as a safety catch
+    if not sDir then
+      giLoopStop=0
+    end
+    debug("(" .. nvl(giLoopStop) .. ") scanning " .. sWorkingDir .. " vertically","vertical2")
+    local bAddedToSelection = false
+    local t = {
+      ["origin"] = vPos,
+      ["direction"] = vDir,
+      ["type"] = 3, -- box
+      ["size"] = detectorSize,
+      ["orientation"] = {vRot.x, vRot.y, vRot.z},
+      ["max_distance"] = fDiscoveryDistance,
+      ["debug"] = gbDevGhostBoxes, -- make it visible for Now
+    }
+    local objs = Physics.cast(t)
+    debug("(" .. nvl(giLoopStop) .. ") found " .. nvl(#objs) .. " to Evaluate: " ..dump(objs) ,"vertical2")
+    local sType, sName, sSuit = cardDeets(oCard)
+    if (sType != "Wild") then
+      firstNonWild = sName .. iif(sName=="3",sType,"")
+    end
+    debug("(" .. nvl(giLoopStop) .. ") scanning " .. sWorkingDir .. "(dir:" .. dump(vDir) .. ") vertically","vertical2")
+
+    -- if (tAlreadyAccountedForObjs) then
+    --   for k, v in pairs(tAlreadyAccountedForObjs) do
+    --     alreadyCheckedGUIDs[v.getGUID()]=1
+    --   end
+    -- end
+
+    debug("AlreadyChecked = " .. dump(alreadyCheckedGUIDs),"vertical2")
+
+    for k, v in pairs(objs) do
+
+      if (v.hit_object.tag=="Card" or v.hit_object.tag=="Deck") then
+        debug("checking k=" .. k .. "(" .. v.hit_object.getGUID() .. ")", "vertical2")
+      end
+
+      if ((v.hit_object.tag=="Card" or v.hit_object.tag=="Deck")
+          and not alreadyCheckedGUIDs[v.hit_object.getGUID()]) then
+        debug("passed first gate", "vertical2")
+        alreadyCheckedGUIDs[v.hit_object.getGUID()]=1
+        if (objectInScoreZone(v.hit_object, sColor)) then
+          if (not tOrigSelObjects or findInTable(tOrigSelObjects,v.hit_object)>-1) then
+            local sType, sName, sSuit = nil
+            if (v.hit_object.tag=="Deck") then
+              local _,_,_,cardType = scoreTarget(v.hit_object)
+              if (cardType == 'MIXED') then
+                bFoundDifferentCard = true
+                break
+              end
+              -- mark it wild or notwild (don't really care, let's just say black)
+              sType = iif(cardType == "Wild","Wild","Black")
+              sName = cardType
+              if (sType == "Wild") then
+                iWildCount = 7 -- (Really, just need any number > 2 here)
+              end
+              debug("Checking Deck type/name = " .. sType .. "/" .. sName,"vertical")
+            else
+              sType, sName, _ = cardDeets(v.hit_object)
+              debug("vert found card " .. sName .. " (" .. sType .. ")","vertical")
+            end
+
+            if (sType=="Wild") then
+              iWildCount = iWildCount + 1 -- yes, we maybe just doublecounted a deck (7+1) but don't care.. >2 is all we care about
+            end
+            debug("vert iWildCount= " .. iWildCount,"vertical")
+
+
+            if (sType=="Red" and sName=="3") then
+              bFoundDifferentCard = true
+              debug("Found a Red 3. stop","vertical")
+              break
+            elseif (sType != "Wild" and firstNonWild and firstNonWild != sName .. iif(sName=="3",sType,"")) then
+              bFoundDifferentCard = true
+              debug("Found Different Card = true","vertical")
+              break
+            elseif (sType != "Wild") and iWildCount>2 then
+              -- we have a non-wild card but we've already seen 2 wilds.. so
+              -- we think we're looking at a wild book.  Therefore, this is Different
+              -- and we break out.
+              bFoundDifferentCard = true
+              debug("Found Different Card (nonwild in field of wilds) = true.  Type=" .. sType,"vertical")
+              break
+            elseif ((sType != "Wild") and (not firstNonWild) ) then
+              -- THIS ELSE HAS TO COME LAST AFTER ALL THE DROPOUT ELSEIFs OR
+              -- IT WON'T GET TO THEM.
+              firstNonWild = sName .. iif(sName=="3",sType,"")
+              debug("setting firstnonwild =" .. sName .. " (type = " .. sType .. ")","vertical")
+            else
+              debug("No exceptional state found for " .. v.hit_object.tag .. " " .. sName .. " (" .. sType.. ")","vertical")
+            end
+
+            debug(firstNonWild,"layoutsel")
+            if (firstNonWild) then
+              debug("Added " .. v.hit_object.getDescription() .. " while firstNonWild=".. firstNonWild .. " sName="..sName .. iif(sName=="3",sType,""),"vertical")
+            end
+            table.insert(tSelectionToSpread,v.hit_object)
+            bAddedToSelection = true
+          else
+            debug("v.hit_object: " .. v.hit_object.getDescription() .. " not in original set, so ignoring it", "vertical")
+          end
+        end
+      end
+    end
+
+    if #tSelectionToSpread>0 and bAddedToSelection then
+      if not giLoopStop then
+        giLoopStop=0
+      end
+      debug("(" .. giLoopStop .. ") found " .. nvl(#tSelectionToSpread) .. " to spread, so recursing ".. nvl(sWorkingDir),"vertical2")
+      debug("(" .. giLoopStop .. ") cards: " .. dump(tSelectionToSpread),"vertical2")
+      local tCards={}
+      local oFarthest = findFarthestOnAxisDirection(tSelectionToSpread,vDir)
+      debug("(" .. giLoopStop .. ") farthest (Starting point) is " .. oFarthest.getDescription(),"vertical2")
+      if (giLoopStop<10) then
+        giLoopStop = giLoopStop+1
+        tCards, bFoundDifferentCard = getCardsInMyVertical3(oFarthest, vRot, sColor, nil, tSelectionToSpread,nil,sWorkingDir, alreadyCheckedGUIDs)
+      end
+      debug("(" .. giLoopStop .. ") " .. sWorkingDir.." search found " .. #tCards .. " and adding to selection", "vertical2" )
+      debug(dump(tCards),"vertical2")
+      for _, obj in pairs(tCards) do
+        tablepush(tSelectionToSpread, obj)
+      end
+    end
+  end
+
+--  debug("(" .. giLoopStop .. ") cards: " .. dump(tCards),"vertical2")
+
+  -- Include the original set of cards in the set of cards to be spread
+  if (tOrigSelObjects) then
+    for _, obj in pairs(tOrigSelObjects) do
+      tablepush(tSelectionToSpread, obj)
+    end
+  end
+  return tSelectionToSpread, bFoundDifferentCard
+end
+
+function findFarthestOnAxisDirection(tObjects, vDir)
+  local oFnd = nil
+  local iFnd = nil
+  for _, oObj in pairs (tObjects) do
+    iDist= oObj.getPosition().x*vDir.x + oObj.getPosition().z*vDir.z
+    if not iFnd or iFnd < iDist then
+      iFnd = iDist
+      oFnd = oObj
+    end
+  end
+  return oFnd
+end
+
+
+
+-- =============================================================================
 function getCardsInMyVertical2(oCard, vRot, sColor, tOrigSelObjects, vPos)
   local bFoundDifferentCard = false
   local alreadyCheckedGUIDs = {}
   local tSelectionToSpread = {}
   local fCardPadding = 0.2
+  local fDiscoveryDistance=gv_CARD_SIZE.x*0.5;
+
+  local iWildCount = 0;
+
   -- detect a small rectange, extending to either side the width of a card turned on
   -- it's side (so the long side, plus the padding between cards,plus a tiny bit more to hit the card
   local detectorSize = { gv_CARD_SIZE.z*.75, 2.0, gv_CARD_SIZE.x/10}
@@ -2949,6 +3231,8 @@ function getCardsInMyVertical2(oCard, vRot, sColor, tOrigSelObjects, vPos)
     vPos = oCard.getPosition()
   end
   local firstNonWild = nil
+  local iWildCount = 0;
+
   for _, vDir in pairs(aDir) do
     local t = {
       ["origin"] = vPos,
@@ -2956,7 +3240,7 @@ function getCardsInMyVertical2(oCard, vRot, sColor, tOrigSelObjects, vPos)
       ["type"] = 3, -- box
       ["size"] = detectorSize,
       ["orientation"] = {vRot.x, vRot.y, vRot.z},
-      ["max_distance"] = gv_CARD_SIZE.x*2.5,
+      ["max_distance"] = fDiscoveryDistance,
       ["debug"] = gbDevGhostBoxes, -- make it visible for Now
     }
     local objs = Physics.cast(t)
@@ -2969,25 +3253,62 @@ function getCardsInMyVertical2(oCard, vRot, sColor, tOrigSelObjects, vPos)
         alreadyCheckedGUIDs[v.hit_object.getGUID()]=1
         if (objectInScoreZone(v.hit_object, sColor)) then
           if (not tOrigSelObjects or findInTable(tOrigSelObjects,v.hit_object)>-1) then
-            local sType, sName, sSuit = cardDeets(v.hit_object)
+            local sType, sName, sSuit = nil
+            if (v.hit_object.tag=="Deck") then
+              local _,_,_,cardType = scoreTarget(v.hit_object)
+              if (cardType == 'MIXED') then
+                bFoundDifferentCard = true
+                break
+              end
+              -- mark it wild or notwild (don't really care, let's just say black)
+              sType = iif(cardType == "Wild","Wild","Black")
+              sName = cardType
+              if (sType == "Wild") then
+                iWildCount = 7 -- (Really, just need any number > 2 here)
+              end
+              debug("Checking Deck type/name = " .. sType .. "/" .. sName,"vertical")
+            else
+              sType, sName, _ = cardDeets(v.hit_object)
+              debug("vert found card " .. sName .. " (" .. sType .. ")","vertical")
+            end
+
+            if (sType=="Wild") then
+              iWildCount = iWildCount + 1 -- yes, we maybe just doublecounted a deck (7+1) but don't care.. >2 is all we care about
+            end
+            debug("vert iWildCount= " .. iWildCount,"vertical")
+
+
             if (sType=="Red" and sName=="3") then
               bFoundDifferentCard = true
-              debug("Found a Red 3. stop","layoutsel")
+              debug("Found a Red 3. stop","vertical")
               break
             elseif (sType != "Wild" and firstNonWild and firstNonWild != sName .. iif(sName=="3",sType,"")) then
               bFoundDifferentCard = true
-              debug("Found Different Card = true","layoutsel")
+              debug("Found Different Card = true","vertical")
+              break
+            elseif (sType != "Wild") and iWildCount>2 then
+              -- we have a non-wild card but we've already seen 2 wilds.. so
+              -- we think we're looking at a wild book.  Therefore, this is Different
+              -- and we break out.
+              bFoundDifferentCard = true
+              debug("Found Different Card (nonwild in field of wilds) = true.  Type=" .. sType,"vertical")
               break
             elseif ((sType != "Wild") and (not firstNonWild) ) then
+              -- THIS ELSE HAS TO COME LAST AFTER ALL THE DROPOUT ELSEIFs OR
+              -- IT WON'T GET TO THEM.
               firstNonWild = sName .. iif(sName=="3",sType,"")
+              debug("setting firstnonwild =" .. sName .. " (type = " .. sType .. ")","vertical")
+            else
+              debug("No exceptional state found for " .. v.hit_object.tag .. " " .. sName .. " (" .. sType.. ")","vertical")
             end
+
             debug(firstNonWild,"layoutsel")
             if (firstNonWild) then
-              debug("Added " .. v.hit_object.getDescription() .. " while firstNonWild=".. firstNonWild .. " sName="..sName .. iif(sName=="3",sType,""),"layoutsel")
+              debug("Added " .. v.hit_object.getDescription() .. " while firstNonWild=".. firstNonWild .. " sName="..sName .. iif(sName=="3",sType,""),"vertical")
             end
             table.insert(tSelectionToSpread,v.hit_object)
           else
-            debug("v.hit_object: " .. v.hit_object.getDescription() .. " not in original set, so ignoring it", "layoutsel")
+            debug("v.hit_object: " .. v.hit_object.getDescription() .. " not in original set, so ignoring it", "vertical")
           end
         end
       end
@@ -2996,7 +3317,7 @@ function getCardsInMyVertical2(oCard, vRot, sColor, tOrigSelObjects, vPos)
   return tSelectionToSpread, bFoundDifferentCard
 end
 
-
+-- =============================================================================
 function nvl(val, ifnil)
   if (val) then
     return val
@@ -3086,22 +3407,26 @@ function layoutVerticalStack(sColor, vRot, oTarget, vDesiredPos)
 
   -- Now find everything around it vertically
   local tCards = getCardsInMyVertical2(oTarget, vRot, sColor, nil)
---  debug ("tCards = " .. dump(tCards), "layoutsel")
-  local oLeftMost, oHighest = findLeftMostAndHighest(tCards, vRot)
---  debug ("oLeftMost = " .. oLeftMost.getDescription(),"layoutsel")
---  debug ("oHighest = " .. oHighest.getDescription(),"layoutsel")
 
-  if (not vDesiredPos) then
-    if (gt_DECODE_DIR[vRot.y][1]=="x") then
-      vDesiredPos = {x=oLeftMost.getPosition().x, y=oLeftMost.getPosition().y, z=oHighest.getPosition().z+oHighest.getScale().x/2}
-    else
-      vDesiredPos = {x=oHighest.getPosition().x+oHighest.getScale().x/2, y=oLeftMost.getPosition().y, z=oLeftMost.getPosition().z}
+  if isLayoutable(sColor, tCards) then
+  --  debug ("tCards = " .. dump(tCards), "layoutsel")
+    local oLeftMost, oHighest = findLeftMostAndHighest(tCards, vRot)
+  --  debug ("oLeftMost = " .. oLeftMost.getDescription(),"layoutsel")
+  --  debug ("oHighest = " .. oHighest.getDescription(),"layoutsel")
+
+    if (not vDesiredPos) then
+      if (gt_DECODE_DIR[vRot.y][1]=="x") then
+        vDesiredPos = {x=oLeftMost.getPosition().x, y=oLeftMost.getPosition().y, z=oHighest.getPosition().z+oHighest.getScale().x/2}
+      else
+        vDesiredPos = {x=oHighest.getPosition().x+oHighest.getScale().x/2, y=oLeftMost.getPosition().y, z=oLeftMost.getPosition().z}
+      end
     end
+    vDropTop = spread3("s",sColor, 1, vDesiredPos, tCards)
+    debug("vDropTop = " .. dump(vDropTop),"layoutsel")
+  else
+    debug("Vertical Selection was Not Layoutable.","layoutsel")
   end
-  vDropTop = spread3("s",sColor, 1, vDesiredPos, tCards)
-  debug("vDropTop = " .. dump(vDropTop),"layoutsel")
-
-    return vNextPos
+  return vNextPos
 end
 
 
@@ -3155,7 +3480,7 @@ function layoutSubSelection(sColor, vRot, tObjects, vDesiredPos)
 end
 
 
-function nearMe(vPos, vRot, sel, iHighLow)
+function nearMe(vPos, vRot, sel, iHighLow, playerColor)
   -- iHighLow -1 to go high, 1 to go lower
 
   debug("Called nearMe","nearme")
@@ -3230,10 +3555,11 @@ function nearMe(vPos, vRot, sel, iHighLow)
         local stackObjs = Physics.cast(s)
         local fHighest=nil
         for kStackCard, vStackCard in pairs(stackObjs) do
-          if (vStackCard.hit_object.tag=="Card") then
+          if (vStackCard.hit_object.tag=="Card") then -- and (not playerColor  or  objectInScoreZone(vSTackCard.hit_object, playerColor)) then
             --debug("in range: " .. vStackCard.hit_object.getDescription(),"nearme")
             --debug("zpos=".. vStackCard.hit_object.getPosition().z,"nearme")
             local fRelHeight=iif(cDecodeDir[vRot.y][1]=="x",vStackCard.hit_object.getPosition().z,vStackCard.hit_object.getPosition().x)
+
             if (not fHighest or iif(cDecodeDir[vRot.y][2]==1,(fHighest<fRelHeight),(fHighest>fRelHeight))) then
               fHighest = fRelHeight
               oHighest = vStackCard.hit_object
@@ -3245,10 +3571,10 @@ function nearMe(vPos, vRot, sel, iHighLow)
         -- that against any other stacks (read: the other side of this particular
         -- spread may have cards too) to see which is nearest at that is the
         -- one we'll align to
-        if (not fNearest or
+        if (fHighest and (not fNearest or
             iif(cDecodeDir[vRot.y][2]==1*iHighLow,
                 (fNearest<math.abs(fNearest-fHighest)),
-                (fNearest>math.abs(fNearest-fHighest)))) then
+                (fNearest>math.abs(fNearest-fHighest))))) then
           --debug("setting nearesttotarget to " .. oHighest.getDescription(),"nearme")
           fNearest = fHighest
           oNearest = oHighest
@@ -3609,8 +3935,8 @@ end
 function AssessLayoutableForOne(obj, bIsLayoutable, sDeckType, iWildCount)
   local shortColor, shortName, _ = cardDeets(obj)
   debug ("Assessing " .. shortName .. " DT:" .. sDeckType,"Assessment" )
-  if ((sDeckType != shortName) and (string.match(shortName,"[3456789]") or shortName == "Jack" or shortName == "Queen" or shortName == "King" or shortName == "Ace")) then
-    if sDeckType == "" then
+  if ((sDeckType != shortName) and (string.match(shortName,"[3456789]") or shortName == "10" or shortName == "Jack" or shortName == "Queen" or shortName == "King" or shortName == "Ace")) then
+    if ((not sDeckType) or (sDeckType == "")) then
       sDeckType = shortName
     else
       debug ("fail b/c DeckType(".. sDeckType ..") <> shortName(".. shortName .. ") ","Assessment")
@@ -3620,7 +3946,7 @@ function AssessLayoutableForOne(obj, bIsLayoutable, sDeckType, iWildCount)
   if (shortName == "2" or shortName == "Joker") then
     iWildCount = iWildCount+1
     if iWildCount>2 then
-      if sDeckType == "" then
+      if ((not sDeckType) or (sDeckType == "")) then
         sDeckType = "Wild"
       else
         if (sDeckType != "Wild") then
@@ -3681,22 +4007,22 @@ local itemCount = 0
 
   if itemCount <= 2 then
 --    log ("fail b/c itemcount <=2")
-    if false then
-      tCards = layoutVerticalStack(playerColor, obj_Zone[playerColor].getRotation(), sel[1], nil)
-      if tCards then
-        debug("tCard cnt = "..#tCards,"prob1")
-      else
-        debug("no tCards","prob1")
-      end
-      -- this should really check the contents, not just count
-      -- may be a problem later
-      if (tCards and #tCards != #sel) then
-        for k, v in pairs(tCards) do
-          v.addToPlayerSelection(playerColor)
-        end
-        return isLayoutable(playerColor)
-      end
-    end
+    -- if false then
+    --   tCards = layoutVerticalStack(playerColor, obj_Zone[playerColor].getRotation(), sel[1], nil)
+    --   if tCards then
+    --     debug("tCard cnt = "..#tCards,"prob1")
+    --   else
+    --     debug("no tCards","prob1")
+    --   end
+    --   -- this should really check the contents, not just count
+    --   -- may be a problem later
+    --   if (tCards and #tCards != #sel) then
+    --     for k, v in pairs(tCards) do
+    --       v.addToPlayerSelection(playerColor)
+    --     end
+    --     return isLayoutable(playerColor)
+    --   end
+    -- end
     bIsLayoutable = false
     debug("End Check","prob1")
     return false
@@ -3727,6 +4053,7 @@ function getNonWild(tCards, oElseCard)
   end
   return nil
 end
+
 
 -- =============================================================================
 function queueSpread (playerColor, oDropped)
@@ -3782,7 +4109,7 @@ function queueSpread (playerColor, oDropped)
     -- find cards within the vertical of the dropped card (or selection if oDropped is nill)
     -- this returns the list of cards found up to and NOT including any cards with
     -- a different non-wild value.
-    tCards, bFoundDifferentCard = getCardsInMyVertical2(oDropped, vRot, playerColor, nil, Player[playerColor].getPointerPosition())
+    tCards, bFoundDifferentCard = getCardsInMyVertical3(oDropped, vRot, playerColor, nil, nil, Player[playerColor].getPointerPosition())
 
     -- tCards are all the cards in the vertical, but we're possibly dropping a few
     -- cards that are horizontally laid out, like from a hand.  so we need to add all
@@ -3901,7 +4228,8 @@ function queueSpread (playerColor, oDropped)
       -- toward a different player.. otherwise, toward us.
       if (not playerStuff[playerColor].bMaskActions) then
       --  spread3("s",playerColor,0)
-        debug("spread - 1","queuespread")
+      debug("spread - 1","queuespread")
+      debug(">>>>>>spreading - 1 : " .. dump(tCards),"vertical2")
         -- do the spread, for this color, dropping it at our desired position
         -- then clear the semaphores so they can queuespread again
          Wait.time(function()
@@ -3975,6 +4303,11 @@ function checkFootNote(sColor, iCheckCount)
         if (tBookCount[sColor][gi_RED_BOOK_SCORE]>1 and tBookCount[sColor][gi_BLACK_BOOK_SCORE]>1) then
           soundCube.AssetBundle.playTriggerEffect(13)
           broadcastToAll(coolName(sColor) .. " has gone out!!","Yellow")
+          gbHandWonPause = true
+          gbFinishFlag = true
+          Wait.time(function() gbFinishFlag=false; setCardDecal(); end, 10.0)
+          Wait.time(function() gbHandWonPause=false end, 5.0)
+          finishFlag()
         else
           if (iCheckCount<5) then
             Wait.time(function () checkFootNote(sColor, iCheckCount+1) end, 1.0)
@@ -4178,6 +4511,14 @@ function scoreTarget(target)
     --            debug("oneCard:" .. shortName .. " --- " .. scr )
       end
     end
+
+    -- now card type will have 3-Ace, Wild, or Mixed in it. (for returning later)
+    if (bInconsistentDeck) then
+      cardType = "MIXED"
+    elseif (not cardType) then
+      cardType = "Wild"
+    end
+
     sAddTxt = ""
     if (target != mainDeck) then
       --debug('Guids = ' .. guidGotBlack .. ' - ' .. guidGotRed)
@@ -4279,9 +4620,10 @@ function scoreTarget(target)
       score = -1 * score
       bookScore = 0
   end
-  return score, sDesc, bookScore
+  return score, sDesc, bookScore, cardType
 end
 
+--==============================================================================
 function iif(crit, iftrue, ifnot)
   if (crit) then
     return iftrue
@@ -4446,6 +4788,10 @@ end
 
   if string.sub(message,1,4)=="#dev" then
     local sVal = string.match(sMsg,"#dev *(.*)")
+    if (sVal == "win") then
+      finishFlag()
+      return false
+    end
     if (sVal == "ghost") then
       local sVal = string.match(sMsg,"#dev *ghost *(.*)")
       gbDevGhostBoxes=(sVal=="true")
