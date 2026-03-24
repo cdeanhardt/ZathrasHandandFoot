@@ -24,7 +24,7 @@ gbFinishFlag = false        -- a temporary state boolean declaring whether the F
 gbPlaySounds=false          -- admin boolean to play sounccube sounds or not (generally not when using turns)
 giDiscardSound = 9          -- if playing sounds, use this one for a discard
 gbShowDirButtons=false      -- whether to display the x/z buttons useful for debugging orientation
-gbDevGhostBoxes=true       -- show ghost boxes from .Cast calls
+gbDevGhostBoxes=false       -- show ghost boxes from .Cast calls
 giCurNumPlayersOnFelt = -1  -- records the number of players in the current surface, to avoid repaints
 --PanelHeightBeforeClose=0    -- before someone closes the UI panel, save the height for resetting it
                             -- arguably, this should be by-player but the size of the panel should be
@@ -51,7 +51,7 @@ gtDebugFlags={
 --          ["dropped"]=1,
 --["spread"]=1,
 --layoutsel=1,
---["decal"]=1,
+["decal"]=1,
 --  vertical2=1,
 --["getallscorezones"]=1,
 --          ["weird"]=1,
@@ -827,7 +827,11 @@ function onLoad(saved_data)
     if oThing.tag == 'Deck'
         and oThing.getQuantity()>200 then
       mainDeck = oThing
-      break
+    end
+    -- look for cardicons that've been saved in development
+    -- and wipe them out since they won't be in the aCardIcons array anymore
+    if oThing.hasTag("CardIcon") then
+      oThing.destruct()
     end
   end
   --  SOUND_CUBE = '8d1d25'
@@ -1254,16 +1258,24 @@ function onLoad(saved_data)
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0,  bSortLowLeft = true,   bSortAceHigh=true, sSortMetaOrder="wbpa3r>",
                   bSpreading=false, bSpreadQueued=false,
-                  footPos={30,1,35} },
+                  footPos={30,1,35},
+                  drawcount=0,
+                  drawcountdisc=0,
+                  drawcountqueued=false,
+                  footReminder=""},
       ["Green"] = {num=2,
                   bShowFootNotes=false, bQueuedFootNoteCheck=false,
                   bScoreVisible=true,
                   bAlign=1,
-                  bAutoLayout=true,
+                  bAutoLay9out=true,
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="3apbwl<",
                   bSpreading=false, bSpreadQueued=false,
-                  footPos={15,1,30}},
+                  footPos={15,1,30},
+                  drawcount=0,
+                  drawcountdisc=0,
+                  drawcountqueued=false,
+                  footReminder=""},
       ["Blue"] = {num=3,
                   bShowFootNotes=true, bQueuedFootNoteCheck=false,
                   bScoreVisible=true,
@@ -1272,7 +1284,11 @@ function onLoad(saved_data)
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="ar",
                   bSpreading=false, bSpreadQueued=false,
-                  footPos={-30,1,35}},
+                  footPos={-30,1,35},
+                  drawcount=0,
+                  drawcountdisc=0,
+                  drawcountqueued=false,
+                  footReminder=""},
       ["Red"] = {num=4,
                   bShowFootNotes=true, bQueuedFootNoteCheck=false,
                   bScoreVisible=true,
@@ -1281,7 +1297,11 @@ function onLoad(saved_data)
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="a",
                   bSpreading=false, bSpreadQueued=false,
-                  footPos={-30,1,35}}
+                  footPos={-30,1,35},
+                  drawcount=0,
+                  drawcountdisc=0,
+                  drawcountqueued=false,
+                  footReminder=""},
     }
   end
     processSortCommand("White", playerStuff["White"].sSortMetaOrder)
@@ -1486,6 +1506,153 @@ end
 
 -- =============================================================================
 function setCardDecal()
+  -- Alpha Heart = "http://cloud-3.steamusercontent.com/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/"
+  -- Alpha Spade = "http://cloud-3.steamusercontent.com/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/"
+  -- Alpha Wild  = "http://cloud-3.steamusercontent.com/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
+   local sHeartCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265839918/4ABBBBC09C2E8DEF5E2811200185DBDFCA61FB81/"
+   local sSpadeCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265841452/823AF2F0A4B76D72A10C72B2522D8702CFFFB864/"
+   local sWildCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265844883/5530CC0F3061DADB729A495442E7F739C2213731/"
+
+  -- local sHeartCard = "HeartCard"
+  -- local sSpadeCard = "SpadeCard"
+  -- local sWildCard = "WildCard"
+
+  local fSpreadBetweenCards = .75
+  local fScoreGapBetweenCards = .3
+  local fCardHeight=1.48
+  local fRelativeShrinkageFactor = 0.5
+--  local fVertOffset = .4/fRelativeShrinkageFactor/10 --0.2
+  local fVertOffset = .2
+  --fSpreadBetweenCards = fRelativeShrinkageFactor/1.3
+--  local vDecalScale = {x=.8,y=1,z=1}
+  local vDecalScale = {x=1,y=1,z=1}
+
+   vDecalScale = {vDecalScale.x*fRelativeShrinkageFactor,
+                 vDecalScale.y*fRelativeShrinkageFactor,
+                 vDecalScale.z*fRelativeShrinkageFactor, }
+
+  local oSurface = getObjectFromGUID(UI_TABLETOP_SURFACE)
+  local vSurScale = oSurface.getScale()
+  -- Clear all decals
+  oSurface.setDecals({})
+
+  if not aCardIcons then
+    aCardIcons = {}
+  end
+
+  log("destr-s")
+  for i, o in ipairs(aCardIcons) do
+    log("destr")
+    o.destruct()
+  end
+  aCardIcons = {}
+  log("destr-e")
+
+  if gbFinishFlag then
+    finishFlag()
+  end
+
+
+  local _, tBookCount = countScoreInternal()
+  local lplayerList = getSeatedPlayers()
+  for i,sColor in ipairs(lplayerList) do
+    debug("doing " .. sColor, "decal")
+    local vCenter = obj_scoretext[sColor].getPosition()-oSurface.getPosition()
+    debug("scorepos = " .. dump(obj_scoretext[sColor].getPosition()),"decal" )
+    debug("surface  = " .. dump(oSurface.getPosition()),"decal" )
+    debug("vCenter  = " .. dump(vCenter),"decal")
+
+    local vRot = obj_Zone[sColor].getRotation()
+    --vRot.x = 90
+    --vRot.y = vRot.y + 180
+    local vNewPos = shallowCopy(vCenter);
+    vNewPos = moveRelative(vNewPos, fScoreGapBetweenCards, gLEFT, nearestRightAngle(vRot.y) )
+    vNewPos = moveRelative(vNewPos, fVertOffset, gUP, nearestRightAngle(vRot.y) )
+
+    for i=1,tBookCount[sColor][gi_RED_BOOK_SCORE] do
+      vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gLEFT, nearestRightAngle(vRot.y) )
+      vNewPos.y = fCardHeight
+      local object = spawnObject({
+        type = "Custom_Tile",
+        position = vNewPos,
+        rotation = vRot,
+        scale = vDecalScale,
+        sound = false
+      })
+      local param = {
+        image = sHeartCard,
+        thickness = 0.05,
+        stackable = false,
+      }
+      object.setCustomObject(param)
+      object.setColorTint({0,0,0,1})
+      object.locked = true
+      object.addTag("CardIcon")
+      table.insert(aCardIcons,object)
+    end
+    vNewPos = shallowCopy(vCenter);
+    vNewPos = moveRelative(vNewPos, fScoreGapBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
+    vNewPos = moveRelative(vNewPos, fVertOffset, gUP, nearestRightAngle(vRot.y) )
+    for i=1,tBookCount[sColor][gi_BLACK_BOOK_SCORE] do
+      vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
+      vNewPos.y = fCardHeight
+      local object = spawnObject({
+        type = "Custom_Tile",
+        position = vNewPos,
+        rotation = vRot,
+        scale = vDecalScale,
+        sound = false
+      })
+      local param = {
+        image = sSpadeCard,
+        thickness = 0.05,
+        stackable = false,
+      }
+      object.setCustomObject(param)
+      object.setColorTint({0,0,0,1})
+      object.locked = true
+      object.addTag("CardIcon")
+      table.insert(aCardIcons,object)
+    end
+
+    vNewPos = moveRelative(vNewPos, fSpreadBetweenCards*.5, gRIGHT, nearestRightAngle(vRot.y) )
+    for i=1,tBookCount[sColor][gi_WILD_BOOK_SCORE] do
+      vNewPos = moveRelative(vNewPos, fSpreadBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
+      vNewPos.y = fCardHeight
+      debug("Putting Wild at " .. dump(vNewPos) .. " scale:".. dump(vDecalScale) .. " for " .. sColor,"decal");
+      local object = spawnObject({
+        type = "Custom_Tile",
+        position = vNewPos,
+        rotation = vRot,
+        scale = vDecalScale,
+        sound = false
+      })
+      local param = {
+        image = sWildCard,
+        thickness = 0.05,
+        stackable = false,
+      }
+      object.setCustomObject(param)
+      object.setColorTint({0,0,0,1})
+      object.locked = true
+      object.addTag("CardIcon")
+      table.insert(aCardIcons,object)
+    end
+  end
+end
+-- =============================================================================
+function setCardDecal1()
+  -- Alpha Heart = "http://cloud-3.steamusercontent.com/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/"
+  -- Alpha Spade = "http://cloud-3.steamusercontent.com/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/"
+  -- Alpha Wild  = "http://cloud-3.steamusercontent.com/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
+   local sHeartCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265839918/4ABBBBC09C2E8DEF5E2811200185DBDFCA61FB81/"
+   local sSpadeCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265841452/823AF2F0A4B76D72A10C72B2522D8702CFFFB864/"
+   local sWildCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265844883/5530CC0F3061DADB729A495442E7F739C2213731/"
+
+  -- local sHeartCard = "HeartCard"
+  -- local sSpadeCard = "SpadeCard"
+  -- local sWildCard = "WildCard"
+
   local fSpreadBetweenCards = .25
   local fScoreGapBetweenCards = .3
   local fCardHeight=10.75
@@ -1533,12 +1700,13 @@ function setCardDecal()
       debug("Putting Heart at " .. dump(vNewPos) .. " for " .. sColor,"decal");
       local params = {
         name     = "HeartCard",
-        url      = "http://cloud-3.steamusercontent.com/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/",
+        url      = sHeartCard,
         position = vNewPos,
         rotation = vRot,
         scale    = vDecalScale,
       }
       oSurface.addDecal(params)
+
     end
     vNewPos = shallowCopy(vCenter);
     vNewPos = moveRelative(vNewPos, fScoreGapBetweenCards, gRIGHT, nearestRightAngle(vRot.y) )
@@ -1549,7 +1717,7 @@ function setCardDecal()
       debug("Putting Spade at " .. dump(vNewPos) .. " scale:".. dump(vDecalScale) .. " for " .. sColor,"decal");
       local params = {
         name     = "SpadeCard",
-        url      = "http://cloud-3.steamusercontent.com/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/",
+        url      = sSpadeCard,
         position = vNewPos,
         rotation = vRot,
         scale    = vDecalScale,
@@ -1564,7 +1732,7 @@ function setCardDecal()
       local params = {
         name     = "WildCard2",
 --        url      = "http://cloud-3.steamusercontent.com/ugc/1877457015608170745/6DBE94CFF96CCA92FFCD2AD6F7F0409A85DA1347/",
-        url      = "http://cloud-3.steamusercontent.com/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
+        url      = sWildCard,
         position = vNewPos,
         rotation = vRot,
         scale    = vDecalScale,
@@ -2278,7 +2446,6 @@ function spread4(player, desiredPos, tCards)
         return
       end
     end
-
     -- if we have something to do...
     if (tCards and #tCards>0) then
 
@@ -2476,7 +2643,7 @@ function spread4(player, desiredPos, tCards)
           end
         end
       end
-      Player[player].broadcast(#playedCards .. " cards")
+--      Player[player].broadcast(#playedCards .. " cards")
       debug("cardtype, decktype, cardcount = " .. nvl(cardType) .. ", " .. nvl(deckType) .. ", " .. nvl(cardCount), "prob1")
     end
     debug("spread-topdropspot2 = " .. dump(vTopDropSpot),"layoutsel")
@@ -2897,7 +3064,7 @@ function spread3x(spread, player, rottype, desiredPos, tCards)
           end
         end
       end
-      Player[player].broadcast(#playedCards .. " cards")
+--      Player[player].broadcast(#playedCards .. " cards")
       debug("cardtype, decktype, cardcount = " .. cardType .. ", " .. deckType .. ", " .. cardCount, "prob1")
     end
     debug("spread-topdropspot2 = " .. dump(vTopDropSpot),"layoutsel")
@@ -3538,6 +3705,12 @@ function nearMe(vPos, vRot, sel, iHighLow, playerColor)
            or (cDecodeDir[vRot.y][1]=="x" and math.abs(vPos.x-pos.x)>1) ) then
         --debug("vrot="..dump(vRot),"nearme")
         --debug("pos="..dump(pos),"nearme")
+
+        --1234
+        -- tCards, _ = getCardsInMyVertical3(v.hit_object, vRot, sColor, nil, nil, nil, nil, alreadyCheckedGUIDs)
+        -- local _, oHighest = findLeftMostAndHighest(tCards, vRot)
+        --1234
+
         local newOrigin = {  iif(vRot.y==90,pos.x-(detectorSize[1]/4),iif(vRot.y==270,pos.x+(detectorSize[1]/4),pos.x)),
                         pos.y,
                         iif(vRot.y==0,pos.z-(detectorSize[1]/4),iif(vRot.y==180,pos.z+(detectorSize[1]/4),pos.z))
@@ -3719,6 +3892,53 @@ function announceAll(sMsg)
 --  end
 end
 
+function setReminder(sColor)
+--  announceAll("SR:dc=" ..playerStuff[sColor].drawcount)
+  local sOut = " "
+  sOut = sOut .. playerStuff[sColor].footReminder
+  if (playerStuff[sColor].drawcount>0) then
+    if sOut == " " then
+      sOut = "Drew " .. playerStuff[sColor].drawcount
+    else
+      sOut = sOut .. " \nDrew " .. playerStuff[sColor].drawcount
+    end
+  end
+  if (playerStuff[sColor].drawcountdisc>0) then
+    if sOut == " " then
+      sOut = "Drew " .. playerStuff[sColor].drawcountdisc .. " (from discard)"
+    else
+      sOut = sOut .. " \nDrew " .. playerStuff[sColor].drawcountdisc .. " (from discard)"
+    end
+  end
+  textFootNotes[sColor].TextTool.setValue(sOut)
+end
+
+function addToDrawCount(sColor, iCnt, bDiscard)
+  if sColor != "White" then
+    playerStuff["White"].drawcount=0
+    playerStuff["White"].drawcountdisc=0
+  end
+  if sColor != "Green" then
+    playerStuff["Green"].drawcount=0
+    playerStuff["Green"].drawcountdisc=0
+  end
+  if sColor != "Blue" then
+    playerStuff["Blue"].drawcount=0
+    playerStuff["Blue"].drawcountdisc=0
+  end
+  if sColor != "Red" then
+    playerStuff["Red"].drawcount=0
+    playerStuff["Red"].drawcountdisc=0
+  end
+  --announceAll("tick"..playerStuff[sColor].drawcount)
+
+  if bDiscard then
+    playerStuff[sColor].drawcountdisc = playerStuff[sColor].drawcountdisc + iCnt
+  else
+    playerStuff[sColor].drawcount = playerStuff[sColor].drawcount + iCnt
+  end
+end
+
 function playerZoneBoundary (player_color, obj)
   if not gbInitializing then
 
@@ -3726,12 +3946,43 @@ function playerZoneBoundary (player_color, obj)
       local name = coolName(player_color)
       if tablepop(fromdeck,obj.guid) then
         if (not playerStuff[player_color].bMaskActions) then
-          announceAll(name .. " drew 1")
+--          announceAll("dc="..playerStuff[player_color].drawcount)
+          if (playerStuff[player_color].drawcountqueued==false) then
+            playerStuff[player_color].drawcountqueued=true
+            Wait.time(function()
+                --announceAll(name .. " drew " .. playerStuff[player_color].drawcount);
+                setReminder("White")
+                setReminder("Green")
+                setReminder("Blue")
+                setReminder("Red")
+                playerStuff[player_color].drawcountqueued=false;
+                end, 2)
+          end
+          announceAll(name .. " drew 1");
+          addToDrawCount(player_color,1,false)
+
+--          playerStuff[player_color].drawcount = playerStuff[player_color].drawcount+1;
+--          announceAll(name .. " drew 1")
         end
       else
         if tablepop(fromdiscard,obj.guid) then
           if (not playerStuff[player_color].bMaskActions) then
-            announceAll(name .. " drew 1 (from discard)")
+            if (playerStuff[player_color].drawcountqueued==false) then
+              playerStuff[player_color].drawcountqueued=true
+              Wait.time(function()
+                  --announceAll(name .. " drew " .. playerStuff[player_color].drawcountdisc .. " (from discard)");
+                  setReminder("White")
+                  setReminder("Green")
+                  setReminder("Blue")
+                  setReminder("Red")
+                  playerStuff[player_color].drawcountqueued=false;
+--                  playerStuff[player_color].drawcountdisc=0;
+                end, 1)
+            end
+            announceAll(name .. " drew 1 (from discard)");
+            addToDrawCount(player_color,1,true)
+--            playerStuff[player_color].drawcountdisc = playerStuff[player_color].drawcountdisc+1;
+--            announceAll(name .. " drew 1 (from discard)")
           end
         end
       end
@@ -4057,8 +4308,10 @@ end
 
 -- =============================================================================
 function queueSpread (playerColor, oDropped)
-
+  local tCards={}
+  local bFoundDifferentCard=false
   local vDesiredPos = nil
+
   local sel = Player[playerColor].getSelectedObjects()
   -- we either want to have a card being dropped or a whole Selection
   -- if we have neither, then bail out
@@ -4109,6 +4362,7 @@ function queueSpread (playerColor, oDropped)
     -- find cards within the vertical of the dropped card (or selection if oDropped is nill)
     -- this returns the list of cards found up to and NOT including any cards with
     -- a different non-wild value.
+    -- crd-madelocal
     tCards, bFoundDifferentCard = getCardsInMyVertical3(oDropped, vRot, playerColor, nil, nil, Player[playerColor].getPointerPosition())
 
     -- tCards are all the cards in the vertical, but we're possibly dropping a few
@@ -4292,11 +4546,14 @@ function checkFootNote(sColor, iCheckCount)
     end
     if (bFootExists)  then
       if (playerStuff[sColor].bShowFootNotes) then
+        playerStuff[sColor].footReminder="Remember Foot"
         broadcastToColor("Don't forget your foot",sColor)
-        textFootNotes[sColor].TextTool.setValue("Remember Foot")
+        setReminder(sColor)
+        --textFootNotes[sColor].TextTool.setValue("Remember Foot")
         textFootNotes[sColor].TextTool.setFontColor("Yellow")
       end
     else -- else
+      playerStuff[sColor].footReminder=""
       if (#handCards==0) then
         local _, tBookCount = countScoreInternal()
         log("tBookCount=".. dump(tBookCount))
@@ -4305,6 +4562,7 @@ function checkFootNote(sColor, iCheckCount)
           broadcastToAll(coolName(sColor) .. " has gone out!!","Yellow")
           gbHandWonPause = true
           gbFinishFlag = true
+          recordScores()
           Wait.time(function() gbFinishFlag=false; setCardDecal(); end, 10.0)
           Wait.time(function() gbHandWonPause=false end, 5.0)
           finishFlag()
@@ -4314,11 +4572,13 @@ function checkFootNote(sColor, iCheckCount)
           end
         end
       end
-      textFootNotes[sColor].TextTool.setValue(" ")
+      setReminder(sColor)
+--      textFootNotes[sColor].TextTool.setValue(" ")
       textFootNotes[sColor].TextTool.setFontColor("Yellow")
     end
   else
-    textFootNotes[sColor].TextTool.setValue(" ")
+    setReminder(sColor)
+--    textFootNotes[sColor].TextTool.setValue(" ")
     textFootNotes[sColor].TextTool.setFontColor("Yellow")
   end
 end
