@@ -1206,6 +1206,10 @@ function onLoad(saved_data)
   obj_Zone["Red"] = obj_Zone_Red
   obj_Zone["Blue"] = obj_Zone_Blue
   obj_Zone["White"] = obj_Zone_White
+  for sColor, zone in pairs(obj_Zone) do
+    local c = sColor
+    zone.addContextMenuItem("Play Hand", function() autoPlayMatchingCards(c) end, false)
+  end
 
   objTable = getObjectFromGUID('bd69bd')
 
@@ -1494,9 +1498,9 @@ function finishFlag()
   local oSurface = getObjectFromGUID(UI_TABLETOP_SURFACE)
   local params = {
     name     = "FinishFlag2",
---    url      = "http://cloud-3.steamusercontent.com/ugc/1877457015605612653/49761BB03C0CFFB4A8DB96C806666BBB4A01AEEF/",
-    --url      = "http://cloud-3.steamusercontent.com/ugc/1877457015605751193/879FF1D984080D65C9AA792BBC1F978D916E085A/",
-    url      = "http://cloud-3.steamusercontent.com/ugc/1743476829258119278/0155E19E26C55460DBCBDC3389717EEF77444FC2/",
+--    url      = "https://steamusercontent-a.akamaihd.net/ugc/1877457015605612653/49761BB03C0CFFB4A8DB96C806666BBB4A01AEEF/",
+    --url      = "https://steamusercontent-a.akamaihd.net/ugc/1877457015605751193/879FF1D984080D65C9AA792BBC1F978D916E085A/",
+    url      = "https://steamusercontent-a.akamaihd.net/ugc/1743476829258119278/0155E19E26C55460DBCBDC3389717EEF77444FC2/",
     position = {0,10.49,0.05},
     rotation = {90,0,0},
     scale    = {5.25,4.2,1},
@@ -1506,12 +1510,12 @@ end
 
 -- =============================================================================
 function setCardDecal()
-  -- Alpha Heart = "http://cloud-3.steamusercontent.com/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/"
-  -- Alpha Spade = "http://cloud-3.steamusercontent.com/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/"
-  -- Alpha Wild  = "http://cloud-3.steamusercontent.com/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
-   local sHeartCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265839918/4ABBBBC09C2E8DEF5E2811200185DBDFCA61FB81/"
-   local sSpadeCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265841452/823AF2F0A4B76D72A10C72B2522D8702CFFFB864/"
-   local sWildCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265844883/5530CC0F3061DADB729A495442E7F739C2213731/"
+  -- Alpha Heart = "https://steamusercontent-a.akamaihd.net/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/"
+  -- Alpha Spade = "https://steamusercontent-a.akamaihd.net/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/"
+  -- Alpha Wild  = "https://steamusercontent-a.akamaihd.net/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
+   local sHeartCard = "https://steamusercontent-a.akamaihd.net/ugc/1743476829265839918/4ABBBBC09C2E8DEF5E2811200185DBDFCA61FB81/"
+   local sSpadeCard = "https://steamusercontent-a.akamaihd.net/ugc/1743476829265841452/823AF2F0A4B76D72A10C72B2522D8702CFFFB864/"
+   local sWildCard = "https://steamusercontent-a.akamaihd.net/ugc/1743476829265844883/5530CC0F3061DADB729A495442E7F739C2213731/"
 
   -- local sHeartCard = "HeartCard"
   -- local sSpadeCard = "SpadeCard"
@@ -1642,12 +1646,12 @@ function setCardDecal()
 end
 -- =============================================================================
 function setCardDecal1()
-  -- Alpha Heart = "http://cloud-3.steamusercontent.com/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/"
-  -- Alpha Spade = "http://cloud-3.steamusercontent.com/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/"
-  -- Alpha Wild  = "http://cloud-3.steamusercontent.com/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
-   local sHeartCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265839918/4ABBBBC09C2E8DEF5E2811200185DBDFCA61FB81/"
-   local sSpadeCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265841452/823AF2F0A4B76D72A10C72B2522D8702CFFFB864/"
-   local sWildCard = "http://cloud-3.steamusercontent.com/ugc/1743476829265844883/5530CC0F3061DADB729A495442E7F739C2213731/"
+  -- Alpha Heart = "https://steamusercontent-a.akamaihd.net/ugc/1884211780465986822/C3A1927763B19AC38548F92D468B71FB204204E3/"
+  -- Alpha Spade = "https://steamusercontent-a.akamaihd.net/ugc/1884211780465989269/6576A4C7F11E788B4CA053CE3E66CB12C8CFFA19/"
+  -- Alpha Wild  = "https://steamusercontent-a.akamaihd.net/ugc/1877457015608030809/CA5D7ED15CCEE79E6A3F3FFC81D72B8210817308/",
+   local sHeartCard = "https://steamusercontent-a.akamaihd.net/ugc/1743476829265839918/4ABBBBC09C2E8DEF5E2811200185DBDFCA61FB81/"
+   local sSpadeCard = "https://steamusercontent-a.akamaihd.net/ugc/1743476829265841452/823AF2F0A4B76D72A10C72B2522D8702CFFFB864/"
+   local sWildCard = "https://steamusercontent-a.akamaihd.net/ugc/1743476829265844883/5530CC0F3061DADB729A495442E7F739C2213731/"
 
   -- local sHeartCard = "HeartCard"
   -- local sSpadeCard = "SpadeCard"
@@ -1731,7 +1735,7 @@ function setCardDecal1()
       debug("Putting Wild at " .. dump(vNewPos) .. " scale:".. dump(vDecalScale) .. " for " .. sColor,"decal");
       local params = {
         name     = "WildCard2",
---        url      = "http://cloud-3.steamusercontent.com/ugc/1877457015608170745/6DBE94CFF96CCA92FFCD2AD6F7F0409A85DA1347/",
+--        url      = "https://steamusercontent-a.akamaihd.net/ugc/1877457015608170745/6DBE94CFF96CCA92FFCD2AD6F7F0409A85DA1347/",
         url      = sWildCard,
         position = vNewPos,
         rotation = vRot,
@@ -3513,15 +3517,186 @@ end
 function getAllScoreZones()
   local tOut={}
   debug("getting all score zones","getallscorezones")
+  if not objScoreZones[giPlayerCount] then
+    log("WARNING: getAllScoreZones - no zones defined for player count " .. tostring(giPlayerCount))
+    return tOut
+  end
   for sColor, scoreZones in pairs(objScoreZones[giPlayerCount]["Colors"]) do
-    debug("looping through " .. #scoreZones.zones .. " zones for " .. sColor,"getallscorezones")
-    for _, scoreZone in ipairs(scoreZones.zones) do
-      debug("adding zone " .. scoreZone.obj.getGUID(),"getallscorezones")
-      table.insert(tOut, {color=sColor, guid=scoreZone.obj.getGUID()})
+    if scoreZones.zones then
+      debug("looping through " .. #scoreZones.zones .. " zones for " .. sColor,"getallscorezones")
+      for _, scoreZone in ipairs(scoreZones.zones) do
+        local ok, guid = pcall(function() return scoreZone.obj.getGUID() end)
+        if ok and guid then
+          debug("adding zone " .. guid,"getallscorezones")
+          table.insert(tOut, {color=sColor, guid=guid})
+        else
+          log("WARNING: getAllScoreZones - stale or nil zone object for color " .. tostring(sColor))
+        end
+      end
+    else
+      log("WARNING: getAllScoreZones - no zones for color " .. tostring(sColor) .. " at player count " .. tostring(giPlayerCount))
     end
   end
   debug("returning " .. dump(tOut),"getallscorezones")
   return tOut
+end
+
+--==============================================================================
+-- Examines sColor's hand and plays any non-wild card whose rank already exists
+-- on the table (in their score zones).  Cards are played one at a time with a
+-- Collects all card objects of a given rank from sColor's score zones.
+-- Returns the list of objects (Cards and Decks containing that rank).
+function getTableCardsOfRank(sColor, rank)
+  local result = {}
+  if not objScoreZones[giPlayerCount] then return result end
+  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
+  if not colorZones or not colorZones.zones then return result end
+  for _, scoreZone in ipairs(colorZones.zones) do
+    local ok, zoneObjs = pcall(function() return scoreZone.obj.getObjects() end)
+    if ok and zoneObjs then
+      for _, obj in ipairs(zoneObjs) do
+        if obj.tag == "Card" then
+          local _, r, _ = cardDeets(obj)
+          if r == rank then table.insert(result, obj) end
+        elseif obj.tag == "Deck" then
+          local deckCards = obj.getObjects()
+          if #deckCards > 0 then
+            local _, r, _ = cardDeets(deckCards[1])
+            if r == rank then table.insert(result, obj) end
+          end
+        end
+      end
+    end
+  end
+  return result
+end
+
+-- short delay between each so queueSpread can finish before the next card lands.
+function autoPlayMatchingCards(sColor)
+  local function dph(str)
+    if gtDebugFlags["playhand"] then
+      printToColor("[playhand] " .. str, sColor)
+    end
+  end
+
+  printToColor("[playhand] function called", sColor)
+  dph("giPlayerCount = " .. tostring(giPlayerCount))
+  dph("giPlayerCount = " .. tostring(giPlayerCount))
+
+  if not objScoreZones[giPlayerCount] then
+    dph("FAIL: no objScoreZones entry for player count " .. tostring(giPlayerCount))
+    broadcastToColor("No layout defined for current player count", sColor)
+    return
+  end
+  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
+  if not colorZones or not colorZones.zones then
+    dph("FAIL: no colorZones or zones for " .. sColor)
+    broadcastToColor("No score zones found for " .. sColor, sColor)
+    return
+  end
+  dph("colorZones found, zone count = " .. #colorZones.zones)
+
+  -- Build a map of rank -> {obj, pos} for a representative table card
+  local rankTargets = {}
+  for zi, scoreZone in ipairs(colorZones.zones) do
+    local ok, zoneObjs = pcall(function() return scoreZone.obj.getObjects() end)
+    if not ok or not zoneObjs then
+      dph("zone " .. zi .. " is nil or invalid, skipping")
+    else
+      dph("zone " .. zi .. " has " .. #zoneObjs .. " object(s)")
+      for _, obj in ipairs(zoneObjs) do
+        dph("  found object: tag=" .. obj.tag .. " desc=" .. obj.getDescription())
+        if obj.tag == "Card" then
+          local cardColor, rank, _ = cardDeets(obj)
+          dph("  Card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
+          if cardColor ~= "Wild" and not rankTargets[rank] then
+            rankTargets[rank] = {obj=obj, pos=obj.getPosition()}
+            dph("  -> added rank target: " .. rank)
+          end
+        elseif obj.tag == "Deck" then
+          local deckCards = obj.getObjects()
+          dph("  Deck has " .. #deckCards .. " card(s)")
+          for _, dc in ipairs(deckCards) do
+            local cardColor, rank, _ = cardDeets(dc)
+            dph("  Deck card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
+            if cardColor ~= "Wild" and not rankTargets[rank] then
+              rankTargets[rank] = {obj=obj, pos=obj.getPosition()}
+              dph("  -> added rank target from deck: " .. rank)
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+
+  local rankList = ""
+  for r, _ in pairs(rankTargets) do rankList = rankList .. r .. " " end
+  dph("ranks on table: [" .. rankList .. "]")
+
+  -- Find non-wild hand cards whose rank is already on the table, grouped by rank
+  local byRank = {}
+  local rankOrder = {}
+  local handCards = Player[sColor].getHandObjects()
+  dph("hand has " .. #handCards .. " card(s)")
+  for _, card in ipairs(handCards) do
+    local cardColor, rank, _ = cardDeets(card)
+    dph("  hand card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor) .. " playable=" .. tostring(cardColor ~= "Wild" and rankTargets[rank] ~= nil))
+    if cardColor ~= "Wild" and rankTargets[rank] then
+      if not byRank[rank] then
+        byRank[rank] = {}
+        table.insert(rankOrder, rank)
+      end
+      table.insert(byRank[rank], card)
+    end
+  end
+
+  local totalCards = 0
+  for _, rank in ipairs(rankOrder) do totalCards = totalCards + #byRank[rank] end
+  dph("toPlay count = " .. totalCards .. " across " .. #rankOrder .. " rank(s)")
+
+  if totalCards == 0 then
+    broadcastToColor("No playable cards found in hand", sColor)
+    return
+  end
+
+  broadcastToColor("Auto-playing " .. totalCards .. " card(s)", sColor)
+
+  local t = 0
+  for _, rank in ipairs(rankOrder) do
+    local cards = byRank[rank]
+    local target = rankTargets[rank]
+    for _, card in ipairs(cards) do
+      local capturedCard = card
+      Wait.time(function()
+        local ok, desc = pcall(function() return capturedCard.getDescription() end)
+        if ok then
+          dph("playing " .. desc .. " onto rank " .. rank)
+          capturedCard.setPosition(target.pos)
+          playerStuff[sColor].bSpreadQueued = true
+          queueSpread(sColor, capturedCard)
+        else
+          dph("card for rank " .. rank .. " was invalid by the time its timer fired")
+        end
+      end, t)
+      t = t + 1.5
+    end
+    -- after all cards of this rank are placed, spread the full line
+    local capturedRank = rank
+    local capturedTarget = target
+    Wait.time(function()
+      local allCards = getTableCardsOfRank(sColor, capturedRank)
+      dph("layout pretty for rank " .. capturedRank .. ": found " .. #allCards .. " object(s) on table")
+      if #allCards > 0 then
+        spread4(sColor, capturedTarget.pos, allCards)
+      end
+    end, t)
+    t = t + 1.5
+  end
+
+  Wait.time(function()
+    broadcastToColor("hand played", sColor)
+  end, t)
 end
 
 --==============================================================================
@@ -4966,6 +5141,12 @@ function onChat(message, sender)
     Player[sColor].print ("#score copy")
     Player[sColor].print ("#footnote [true|false] [, <color>] : turn footnote warnings on/off for self or target color")
     Player[sColor].print ("#align [true|false] [, <color>] : evenly space card stacks")
+    Player[sColor].print ("#playhand : auto-play matching cards from hand to table")
+    return false
+  end
+
+  if string.gsub(message,"%s+","")=="#playhand" then
+    autoPlayMatchingCards(sColor)
     return false
   end
 
@@ -5097,8 +5278,16 @@ end
 
   if string.sub(sMsg,1,6)=="#debug" then
     local sVal = string.match(sMsg,"#debug *(.*)")
-    gtDebugFlags[sVal]=1
-    printToColor("Debug set to " .. dump(gtDebugFlags),sColor)
+    if sVal == "on" then
+      gtDebugFlags["playhand"] = 1
+      printToColor("playhand debug ON", sColor)
+    elseif sVal == "off" then
+      gtDebugFlags["playhand"] = nil
+      printToColor("playhand debug OFF", sColor)
+    else
+      gtDebugFlags[sVal] = 1
+      printToColor("Debug set to " .. dump(gtDebugFlags), sColor)
+    end
     return false
   end
 
