@@ -2632,6 +2632,8 @@ function spread4(player, desiredPos, tCards)
             end
           end
           Wait.time( function() setCardDecal(); end, 1.0)
+          -- Book complete: after cards have settled into a Deck, move it to zone 2/3.
+          Wait.time( function() checkAndMoveBooks(player); end, 2.5)
 
       -- if we're neither near-bookable 6 cards or stackable 7+ cards, Then
       -- we just need to plunk all the spinnable cards down at the bottom
@@ -3638,8 +3640,9 @@ function handleRedThrees(sColor, callback, depth)
   local hand  = Player[sColor].getHandObjects()
   local red3s = {}
   for _, card in ipairs(hand) do
-    local cardColor, rank, _ = cardDeets(card)
-    if rank == "3" and cardColor == "Red" then
+    local cardColor, rank, suit = cardDeets(card)
+    -- Only Hearts and Diamonds 3s go to the side stack; never Clubs or Spades.
+    if rank == "3" and (suit == "Hearts" or suit == "Diamonds") then
       table.insert(red3s, card)
     end
   end
@@ -3873,11 +3876,32 @@ function computeNewLinePosition(sColor, colorZones, rotY, dph)
   local topmostDepth = nil
   local columns      = {}   -- list of { lat, dep } one entry per meld column
 
+  -- Returns true if an object is the red-3 side-stack meld (rank "3").
+  -- These should be ignored when deciding where to place new rank melds.
+  local function isRed3Meld(obj)
+    -- Returns true only for Hearts/Diamonds 3s (the red-3 side stack).
+    -- Black 3s (Clubs/Spades) are normal meld cards and must not be skipped.
+    local function isRedThree(cardInfo)
+      local _, rank, suit = cardDeets(cardInfo)
+      return rank == "3" and (suit == "Hearts" or suit == "Diamonds")
+    end
+    if obj.tag == "Card" then
+      return isRedThree(obj)
+    elseif obj.tag == "Deck" then
+      local ok_d, cards = pcall(function() return obj.getObjects() end)
+      if ok_d and cards and #cards > 0 then
+        return isRedThree(cards[1])
+      end
+    end
+    return false
+  end
+
   local zone1 = colorZones.zones[1]
   local ok, zoneObjs = pcall(function() return zone1.obj.getObjects() end)
   if ok and zoneObjs then
     for _, obj in ipairs(zoneObjs) do
-      if not obj.is_face_down and (obj.tag == "Card" or obj.tag == "Deck") then
+      if not obj.is_face_down and (obj.tag == "Card" or obj.tag == "Deck")
+         and not isRed3Meld(obj) then
         local ok_o, opos = pcall(function() return obj.getPosition() end)
         if ok_o and opos then
           local lat = opos[lateralAxis]
@@ -4167,6 +4191,159 @@ function layoutHandAll(sColor, skipRedThrees)
       layoutHandRank(sColor, capturedRank, true)  -- red 3s already handled above
     end, t)
     t = t + (byRank[rank] * 0.3) + 1.5
+  end
+end
+
+--==============================================================================
+-- Scans zone 1 for complete books (face-up Deck with qty >= 7) and moves each
+-- to the next available slot in the side zones (2 and/or 3).
+-- The zone to the player's right fills left-to-right (inner edge outward).
+-- The zone to the player's left fills right-to-left (inner edge outward).
+function checkAndMoveBooks(sColor)
+  if not giPlayerCount or not objScoreZones[giPlayerCount] then return end
+  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
+  if not colorZones or not colorZones.zones then return end
+  if not colorZones.zones[1] or not colorZones.zones[1].obj then return end
+  if not colorZones.zones[2] or not colorZones.zones[2].obj then return end
+
+  local rotY = gt_COLOR_ROT[sColor] or 0
+  local decode = gt_DECODE_DIR[rotY]
+  if not decode then return end
+  local lateralAxis = decode[1]
+  local direction   = decode[2]
+  local depthAxis   = (lateralAxis == "x") and "z" or "x"
+
+  -- Books are stacked rotated 90°; lateral footprint = card depth dimension.
+  -- Books are rotated 90° but the long dimension (x=3) stays lateral after that
+  -- rotation in TTS, so use gv_CARD_SIZE.x as the lateral footprint.
+  local bookGap = gv_CARD_SIZE.x + 0.5   -- 3.5 units center-to-center
+
+  -- Gather geometry (position + scale) for a side zone.
+  local function getZoneGeo(zi)
+    local z = colorZones.zones[zi]
+    if not z or not z.obj then return nil end
+    local ok_p, zp = pcall(function() return z.obj.getPosition() end)
+    local ok_s, zs = pcall(function() return z.obj.getScale()    end)
+    if not ok_p or not ok_s or not zp or not zs then return nil end
+    local latHalf = ((lateralAxis == "x") and zs.x or zs.z) / 2
+    return {pos=zp, scl=zs, latHalf=latHalf}
+  end
+
+  local geo = {[2]=getZoneGeo(2), [3]=getZoneGeo(3)}
+
+  -- Determine which side zone is "right" (further in the direction sense) and "left".
+  local rightIdx, leftIdx
+  if geo[2] and geo[3] then
+    if geo[2].pos[lateralAxis] * direction >= geo[3].pos[lateralAxis] * direction then
+      rightIdx, leftIdx = 2, 3
+    else
+      rightIdx, leftIdx = 3, 2
+    end
+  elseif geo[2] then
+    if geo[2].pos[lateralAxis] * direction >= 0 then rightIdx = 2 else leftIdx = 2 end
+  elseif geo[3] then
+    if geo[3].pos[lateralAxis] * direction >= 0 then rightIdx = 3 else leftIdx = 3 end
+  end
+
+  -- Count existing complete books in a side zone.
+  local function countBooks(zi)
+    if not zi or not geo[zi] then return 0 end
+    local ok, objs = pcall(function() return colorZones.zones[zi].obj.getObjects() end)
+    if not ok or not objs then return 0 end
+    local n = 0
+    for _, obj in ipairs(objs) do
+      if not obj.is_face_down and obj.tag == "Deck" then
+        local ok_q, qty = pcall(function() return obj.getQuantity() end)
+        if ok_q and qty and qty >= 7 then n = n + 1 end
+      end
+    end
+    return n
+  end
+
+  -- Lateral coordinate of the n-th slot in a zone.
+  -- rightFill=true  → zone fills in `direction` direction (left→right for player)
+  -- rightFill=false → zone fills in `-direction` direction (right→left for player)
+  -- In both cases, slot 1 is at the inner edge (closest to board center).
+  local function slotLat(zi, n, rightFill)
+    local g = geo[zi]; if not g then return nil end
+    local innerEdge, fillDir
+    if rightFill then
+      innerEdge = g.pos[lateralAxis] - direction * g.latHalf
+      fillDir   = direction
+    else
+      innerEdge = g.pos[lateralAxis] + direction * g.latHalf
+      fillDir   = -direction
+    end
+    return innerEdge + fillDir * (n - 0.5) * bookGap
+  end
+
+  -- Check that a lateral coordinate is within the zone's bounds.
+  local function slotValid(zi, lat, rightFill)
+    local g = geo[zi]; if not g then return false end
+    local outerEdge
+    if rightFill then
+      outerEdge = g.pos[lateralAxis] + direction * g.latHalf
+      return (lat - outerEdge) * direction <= 0
+    else
+      outerEdge = g.pos[lateralAxis] - direction * g.latHalf
+      return (lat - outerEdge) * (-direction) <= 0
+    end
+  end
+
+  local nRight = countBooks(rightIdx)
+  local nLeft  = countBooks(leftIdx)
+
+  -- Depth (forward/back) and y positions for placement in the side zones.
+  local refGeo = geo[rightIdx] or geo[leftIdx]
+  if not refGeo then return end
+  local targetDepth = refGeo.pos[depthAxis]
+  local targetY     = refGeo.pos.y - refGeo.scl.y / 2 + gv_CARD_SIZE.y
+
+  -- Scan zone 1 for complete books to relocate.
+  local zone1Books = {}
+  local ok1, z1objs = pcall(function() return colorZones.zones[1].obj.getObjects() end)
+  if not ok1 or not z1objs then return end
+  for _, obj in ipairs(z1objs) do
+    if not obj.is_face_down and obj.tag == "Deck" then
+      local ok_q, qty = pcall(function() return obj.getQuantity() end)
+      if ok_q and qty and qty >= 7 then
+        table.insert(zone1Books, obj)
+      end
+    end
+  end
+
+  if #zone1Books == 0 then return end
+
+  -- Move each zone-1 book to the next available side-zone slot.
+  local delay = 0
+  for _, book in ipairs(zone1Books) do
+    local targetLat = nil
+
+    -- Prefer right zone (left-to-right fill)
+    if rightIdx then
+      local lat = slotLat(rightIdx, nRight + 1, true)
+      if lat and slotValid(rightIdx, lat, true) then
+        targetLat = lat; nRight = nRight + 1
+      end
+    end
+    -- Fall back to left zone (right-to-left fill)
+    if not targetLat and leftIdx then
+      local lat = slotLat(leftIdx, nLeft + 1, false)
+      if lat and slotValid(leftIdx, lat, false) then
+        targetLat = lat; nLeft = nLeft + 1
+      end
+    end
+
+    if targetLat then
+      local captured = book
+      local tPos = {x=0, y=targetY, z=0}
+      tPos[lateralAxis] = targetLat
+      tPos[depthAxis]   = targetDepth
+      Wait.time(function()
+        pcall(function() captured.setPositionSmooth(tPos, false, true) end)
+      end, delay)
+      delay = delay + 0.4
+    end
   end
 end
 
