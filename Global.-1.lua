@@ -3576,8 +3576,123 @@ function getTableCardsOfRank(sColor, rank)
   return result
 end
 
+--==============================================================================
+-- Returns the world position for the red-3 meld: just below the player's
+-- face-down foot pile (away from board center, toward the player's edge).
+function getRedThreeMeldPos(sColor)
+  local rotY   = gt_COLOR_ROT[sColor] or 0
+  local decode = gt_DECODE_DIR[rotY]
+  if not decode then return nil end
+  local lateralAxis = decode[1]
+  local direction   = decode[2]
+  local depthAxis   = (lateralAxis == "x") and "z" or "x"
+
+  -- Scan score zones for the face-down foot pile to get its actual world position.
+  local footPilePos = nil
+  if giPlayerCount and objScoreZones[giPlayerCount] then
+    local cz = objScoreZones[giPlayerCount]["Colors"][sColor]
+    if cz and cz.zones then
+      for _, sz in ipairs(cz.zones) do
+        local ok, objs = pcall(function() return sz.obj.getObjects() end)
+        if ok and objs then
+          for _, obj in ipairs(objs) do
+            if obj.is_face_down then
+              local ok_p, p = pcall(function() return obj.getPosition() end)
+              if ok_p and p then footPilePos = p; break end
+            end
+          end
+        end
+        if footPilePos then break end
+      end
+    end
+  end
+  -- Fallback: use the dealing-time footPos stored in playerStuff
+  if not footPilePos then
+    local ps = playerStuff and playerStuff[sColor]
+    if ps and ps.footPos and #ps.footPos >= 3 then
+      footPilePos = {x=ps.footPos[1], y=ps.footPos[2], z=ps.footPos[3]}
+    end
+  end
+  if not footPilePos then return nil end
+
+  -- Offset "below" the foot pile: away from board center (toward the player's edge).
+  -- direction = toward-center sign, so -direction = away from center.
+  local gap = gv_CARD_SIZE.z * 2.5
+  local pos = {x=footPilePos.x, y=footPilePos.y, z=footPilePos.z}
+  pos[depthAxis] = footPilePos[depthAxis] - direction * gap
+  return pos
+end
+
+--==============================================================================
+-- Moves all red 3s (3♥ / 3♦) from the player's hand to the red-3 side-stack
+-- meld below the foot pile, drawing one replacement card from mainDeck for
+-- each.  Repeats recursively if a replacement card is itself a red 3.
+-- Calls callback() once no more red 3s remain in hand.
+function handleRedThrees(sColor, callback, depth)
+  depth = depth or 0
+  if depth > 8 then          -- safety: at most 8 passes (deck has only 4 red 3s)
+    if callback then callback() end
+    return
+  end
+
+  local hand  = Player[sColor].getHandObjects()
+  local red3s = {}
+  for _, card in ipairs(hand) do
+    local cardColor, rank, _ = cardDeets(card)
+    if rank == "3" and cardColor == "Red" then
+      table.insert(red3s, card)
+    end
+  end
+
+  if #red3s == 0 then
+    if callback then callback() end
+    return
+  end
+
+  local targetPos = getRedThreeMeldPos(sColor)
+  if not targetPos then
+    broadcastToColor("Could not locate foot pile for red 3 placement", sColor)
+    if callback then callback() end
+    return
+  end
+
+  broadcastToColor("Moving " .. #red3s .. " red 3(s) to side stack", sColor)
+
+  local t = 0
+  for _, card in ipairs(red3s) do
+    local captured = card
+    local pos      = targetPos
+    Wait.time(function()
+      pcall(function() captured.setPosition(pos) end)
+    end, t)
+    t = t + 0.3
+    -- Draw a replacement card from the main deck for each red 3 played
+    Wait.time(function()
+      if mainDeck then
+        local ok, qty = pcall(function() return mainDeck.getQuantity() end)
+        if ok and qty and qty > 0 then
+          pcall(function() mainDeck.deal(1, sColor) end)
+        end
+      end
+    end, t)
+    t = t + 0.5
+  end
+
+  -- After replacements arrive, check again in case a drawn card is also a red 3
+  local capturedDepth    = depth
+  local capturedCallback = callback
+  Wait.time(function()
+    handleRedThrees(sColor, capturedCallback, capturedDepth + 1)
+  end, t + 0.5)
+end
+
 -- short delay between each so queueSpread can finish before the next card lands.
-function autoPlayMatchingCards(sColor)
+function autoPlayMatchingCards(sColor, skipRedThrees)
+  -- Handle red 3s first; re-enter with skipRedThrees=true once done.
+  if not skipRedThrees then
+    handleRedThrees(sColor, function() autoPlayMatchingCards(sColor, true) end)
+    return
+  end
   local function dph(str)
     if gtDebugFlags["playhand"] then
       printToColor("[playhand] " .. str, sColor)
@@ -3861,7 +3976,13 @@ end
 -- Lays out 3+ cards of a given rank from the player's hand onto the table.
 -- Adds to an existing meld if one exists; otherwise creates a new line.
 -- Requires 3+ cards of that rank and won't leave fewer than 2 cards in hand.
-function layoutHandRank(sColor, rank)
+function layoutHandRank(sColor, rank, skipRedThrees)
+  -- Handle red 3s first; re-enter with skipRedThrees=true once done.
+  if not skipRedThrees then
+    handleRedThrees(sColor, function() layoutHandRank(sColor, rank, true) end)
+    return
+  end
+
   local function dph(str)
     if gtDebugFlags["layouthand"] then
       printToColor("[layouthand] " .. str, sColor)
@@ -4000,7 +4121,13 @@ end
 --==============================================================================
 -- Lays out all eligible ranks from the player's hand, one rank at a time.
 -- A rank is eligible if the player holds 3+ non-wild cards of that rank.
-function layoutHandAll(sColor)
+function layoutHandAll(sColor, skipRedThrees)
+  -- Handle red 3s first; re-enter with skipRedThrees=true once done.
+  if not skipRedThrees then
+    handleRedThrees(sColor, function() layoutHandAll(sColor, true) end)
+    return
+  end
+
   local handCards = Player[sColor].getHandObjects()
 
   -- Count non-wild cards per rank (exclude 2, 3, Joker)
@@ -4037,7 +4164,7 @@ function layoutHandAll(sColor)
   for _, rank in ipairs(eligible) do
     local capturedRank = rank
     Wait.time(function()
-      layoutHandRank(sColor, capturedRank)
+      layoutHandRank(sColor, capturedRank, true)  -- red 3s already handled above
     end, t)
     t = t + (byRank[rank] * 0.3) + 1.5
   end
