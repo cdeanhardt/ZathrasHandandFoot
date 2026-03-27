@@ -3737,7 +3737,7 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
           elseif obj.tag == "Card" then
             local cardColor, rank, _ = cardDeets(obj)
             dph("  Card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
-            if cardColor ~= "Wild" and not meldTargets[rank] then
+            if cardColor ~= "Wild" and rank ~= "3" and not meldTargets[rank] then
               local ok_pos, objPos = pcall(function() return obj.getPosition() end)
               if ok_pos and objPos then
                 meldTargets[rank] = {obj=obj, pos=objPos}
@@ -3753,7 +3753,7 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
               for _, dc in ipairs(deckCards) do
                 local cardColor, rank, _ = cardDeets(dc)
                 dph("  Deck card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
-                if cardColor ~= "Wild" then
+                if cardColor ~= "Wild" and rank ~= "3" then
                   local ok_pos, objPos = pcall(function() return obj.getPosition() end)
                   if ok_pos and objPos then
                     if isBook then
@@ -3801,7 +3801,7 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
   for _, card in ipairs(handCards) do
     local cardColor, rank, _ = cardDeets(card)
     dph("  hand card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor) .. " playable=" .. tostring(cardColor ~= "Wild" and rankTargets[rank] ~= nil))
-    if cardColor ~= "Wild" and rankTargets[rank] then
+    if cardColor ~= "Wild" and rank ~= "3" and rankTargets[rank] then
       if not byRank[rank] then
         byRank[rank] = {}
         table.insert(rankOrder, rank)
@@ -4340,7 +4340,7 @@ function checkAndMoveBooks(sColor)
       tPos[lateralAxis] = targetLat
       tPos[depthAxis]   = targetDepth
       Wait.time(function()
-        pcall(function() captured.setPositionSmooth(tPos, false, true) end)
+        pcall(function() captured.setPositionSmooth(tPos, false, false) end)
       end, delay)
       delay = delay + 0.4
     end
