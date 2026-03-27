@@ -3838,13 +3838,15 @@ function computeNewLinePosition(sColor, colorZones, rotY, dph)
     newPos[lateralAxis] = placedLat
 
   else
-    -- Empty zone: 1.5 card-heights from top edge of zone 1, laterally centered
+    -- Empty zone: 1.5 card-heights from top edge of zone 1, 35% from left edge
+    -- (leftEdge + 0.35 * width = center - direction * 0.30 * halfWidth)
     if ok_p and z1p and ok_s and z1s then
-      local depthScale  = (depthAxis == "z") and z1s.z or z1s.x
-      local zoneTopEdge = z1p[depthAxis] + direction * (depthScale / 2)
-      newPos[depthAxis]   = zoneTopEdge - direction * 1.5 * gv_CARD_SIZE.z
-      newPos[lateralAxis] = z1p[lateralAxis]
-      dph("empty zone: cardCenter=" .. tostring(newPos[depthAxis]))
+      local depthScale   = (depthAxis == "z") and z1s.z or z1s.x
+      local zoneLatHalf  = ((lateralAxis == "x") and z1s.x or z1s.z) / 2
+      local zoneTopEdge  = z1p[depthAxis] + direction * (depthScale / 2)
+      newPos[depthAxis]   = zoneTopEdge - direction * 1.0 * gv_CARD_SIZE.z
+      newPos[lateralAxis] = z1p[lateralAxis] - direction * 0.30 * zoneLatHalf
+      dph("empty zone: cardCenter=" .. tostring(newPos[depthAxis]) .. " lat=" .. tostring(newPos[lateralAxis]))
     elseif ok_p and z1p then
       newPos.x = z1p.x
       newPos.z = z1p.z
@@ -3964,16 +3966,26 @@ function layoutHandRank(sColor, rank)
     t = t + 0.3
   end
 
-  -- After all placed, spread4 the full line (existing + new)
+  -- After all placed, do a fresh zone scan to get current (non-stale) objects.
+  -- Explicitly exclude complete books (Deck >= 7) so they are never passed to spread4.
+  -- Using captured references is unsafe: cards landing on the meld cause TTS to merge
+  -- them into a new Deck object, invalidating the old individual card references.
   local capturedRank     = rank
   local capturedPos      = targetPos
   local capturedNewCards = rankCards
   Wait.time(function()
-    -- Reset bSpreading in case a prior operation left it stuck
     if playerStuff[sColor] then playerStuff[sColor].bSpreading = false end
-    local allCards = getTableCardsOfRank(sColor, capturedRank)
+    local freshScan = getTableCardsOfRank(sColor, capturedRank)
+    local allCards  = {}
+    for _, obj in ipairs(freshScan) do
+      local isBook = false
+      if obj.tag == "Deck" then
+        local ok, qty = pcall(function() return obj.getQuantity() end)
+        if ok and qty and qty >= 7 then isBook = true end
+      end
+      if not isBook then table.insert(allCards, obj) end
+    end
     if #allCards == 0 then
-      -- Zone membership not yet registered; use the cards we just moved
       dph("zone scan empty, using direct card list")
       allCards = capturedNewCards
     end
