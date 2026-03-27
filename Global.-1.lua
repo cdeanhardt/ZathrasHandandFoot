@@ -5,6 +5,7 @@ gi_NUM_ROWS=4               -- number of rows in the UI
 gb_USE_TURNS=true           -- admin boolean for whether to used the turn based system or not
 gv_CARD_SIZE = {["x"]=3, ["y"]=1, ["z"]=2} -- Default size of the cards
 gt_DECODE_DIR = { [0]={"x",-1}, [90]={"z",-1}, [180]={"x",1}, [270]={"z",1} } -- table used to help decode directions based on rotation (0, 90,180,270)
+gt_COLOR_ROT  = {White=0, Blue=180, Green=90, Red=270}  -- hand zone rotY per player color
 
 gt_PANEL_VERTICAL_OFFSET_BY_ROWNUM = {[1]=-43,[2]= -73,[3]= -103,[4]= -133}  -- offset to set the 1st icon at, based on the rownumber
 gt_ALIGN_WORDS = {[-3] = "off", [-1]="off", [1]="high", [3]="low"}           -- pretty word to use for how alignment is done, based on special math (see its use)
@@ -1208,7 +1209,8 @@ function onLoad(saved_data)
   obj_Zone["White"] = obj_Zone_White
   for sColor, zone in pairs(obj_Zone) do
     local c = sColor
-    zone.addContextMenuItem("Play Hand", function() autoPlayMatchingCards(c) end, false)
+    zone.addContextMenuItem("Play Hand",        function() autoPlayMatchingCards(c) end, false)
+    zone.addContextMenuItem("Layout All Hand",  function() layoutHandAll(c)         end, false)
   end
 
   objTable = getObjectFromGUID('bd69bd')
@@ -3502,12 +3504,13 @@ function nvl(val, ifnil)
 end
 
 function objectInScoreZone(oThing, sColor)
---  debug("giPC=" .. giPlayerCount .. " - sColor=" .. nvl(sColor), "layoutsel")
---  debug("checking " .. #objScoreZones[giPlayerCount]["Colors"][sColor].zones .. " zones", "layoutsel")
---  debug(dump(objScoreZones[giPlayerCount]["Colors"][sColor].zones), "layoutsel")
---  debug("ABC: " .. dump(objScoreZones[giPlayerCount]["Colors"][sColor].zones[1].obj.getGUID()), "layoutsel")
-  for _, scoreZone in ipairs(objScoreZones[giPlayerCount]["Colors"][sColor].zones) do
-    if (objectInZone(oThing,scoreZone.obj)) then
+  if not sColor then return false end
+  if not objScoreZones[giPlayerCount] then return false end
+  local colorEntry = objScoreZones[giPlayerCount]["Colors"][sColor]
+  if not colorEntry or not colorEntry.zones then return false end
+  for _, scoreZone in ipairs(colorEntry.zones) do
+    local ok, inZone = pcall(function() return objectInZone(oThing, scoreZone.obj) end)
+    if ok and inZone then
       return true
     end
   end
@@ -3555,14 +3558,16 @@ function getTableCardsOfRank(sColor, rank)
     local ok, zoneObjs = pcall(function() return scoreZone.obj.getObjects() end)
     if ok and zoneObjs then
       for _, obj in ipairs(zoneObjs) do
-        if obj.tag == "Card" then
-          local _, r, _ = cardDeets(obj)
-          if r == rank then table.insert(result, obj) end
-        elseif obj.tag == "Deck" then
-          local deckCards = obj.getObjects()
-          if #deckCards > 0 then
-            local _, r, _ = cardDeets(deckCards[1])
+        if not obj.is_face_down then
+          if obj.tag == "Card" then
+            local _, r, _ = cardDeets(obj)
             if r == rank then table.insert(result, obj) end
+          elseif obj.tag == "Deck" then
+            local deckCards = obj.getObjects()
+            if #deckCards > 0 then
+              local _, r, _ = cardDeets(deckCards[1])
+              if r == rank then table.insert(result, obj) end
+            end
           end
         end
       end
@@ -3596,8 +3601,10 @@ function autoPlayMatchingCards(sColor)
   end
   dph("colorZones found, zone count = " .. #colorZones.zones)
 
-  -- Build a map of rank -> {obj, pos} for a representative table card
-  local rankTargets = {}
+  -- Build rank target map: incomplete melds preferred, complete books as fallback.
+  -- A complete book is a Deck with 7+ cards.
+  local meldTargets = {}  -- rank -> {obj, pos}: incomplete face-up melds only
+  local bookTargets = {}  -- rank -> {obj, pos}: complete books (fallback)
   for zi, scoreZone in ipairs(colorZones.zones) do
     local ok, zoneObjs = pcall(function() return scoreZone.obj.getObjects() end)
     if not ok or not zoneObjs then
@@ -3605,28 +3612,62 @@ function autoPlayMatchingCards(sColor)
     else
       dph("zone " .. zi .. " has " .. #zoneObjs .. " object(s)")
       for _, obj in ipairs(zoneObjs) do
-        dph("  found object: tag=" .. obj.tag .. " desc=" .. obj.getDescription())
-        if obj.tag == "Card" then
-          local cardColor, rank, _ = cardDeets(obj)
-          dph("  Card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
-          if cardColor ~= "Wild" and not rankTargets[rank] then
-            rankTargets[rank] = {obj=obj, pos=obj.getPosition()}
-            dph("  -> added rank target: " .. rank)
-          end
-        elseif obj.tag == "Deck" then
-          local deckCards = obj.getObjects()
-          dph("  Deck has " .. #deckCards .. " card(s)")
-          for _, dc in ipairs(deckCards) do
-            local cardColor, rank, _ = cardDeets(dc)
-            dph("  Deck card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
-            if cardColor ~= "Wild" and not rankTargets[rank] then
-              rankTargets[rank] = {obj=obj, pos=obj.getPosition()}
-              dph("  -> added rank target from deck: " .. rank)
-              break
+        -- Wrap per-object access: stale references throw "Object reference not set"
+        local ok_obj = pcall(function()
+          if obj.is_face_down then
+            dph("  -> skipping face-down object")
+          elseif obj.tag == "Card" then
+            local cardColor, rank, _ = cardDeets(obj)
+            dph("  Card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
+            if cardColor ~= "Wild" and not meldTargets[rank] then
+              local ok_pos, objPos = pcall(function() return obj.getPosition() end)
+              if ok_pos and objPos then
+                meldTargets[rank] = {obj=obj, pos=objPos}
+                dph("  -> meld target: " .. rank)
+              end
+            end
+          elseif obj.tag == "Deck" then
+            local ok_qty, qty   = pcall(function() return obj.getQuantity() end)
+            local ok_dc, deckCards = pcall(function() return obj.getObjects() end)
+            if ok_dc and deckCards then
+              local isBook = ok_qty and qty and qty >= 7
+              dph("  Deck qty=" .. tostring(qty) .. " isBook=" .. tostring(isBook))
+              for _, dc in ipairs(deckCards) do
+                local cardColor, rank, _ = cardDeets(dc)
+                dph("  Deck card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
+                if cardColor ~= "Wild" then
+                  local ok_pos, objPos = pcall(function() return obj.getPosition() end)
+                  if ok_pos and objPos then
+                    if isBook then
+                      if not bookTargets[rank] then
+                        bookTargets[rank] = {obj=obj, pos=objPos}
+                        dph("  -> book fallback target: " .. rank)
+                      end
+                    else
+                      if not meldTargets[rank] then
+                        meldTargets[rank] = {obj=obj, pos=objPos}
+                        dph("  -> meld target from deck: " .. rank)
+                      end
+                    end
+                  end
+                  break
+                end
+              end
             end
           end
-        end
+        end)
+        if not ok_obj then dph("  -> skipping stale object reference") end
       end
+    end
+  end
+
+  -- Merge: prefer meld target; use book target only if no meld exists
+  local rankTargets = {}
+  for rank, t in pairs(meldTargets) do rankTargets[rank] = t end
+  for rank, t in pairs(bookTargets) do
+    if not rankTargets[rank] then
+      rankTargets[rank] = t
+      dph("  rank " .. rank .. " using book fallback")
     end
   end
 
@@ -3697,6 +3738,297 @@ function autoPlayMatchingCards(sColor)
   Wait.time(function()
     broadcastToColor("hand played", sColor)
   end, t)
+end
+
+--==============================================================================
+-- Computes the table position for a brand-new meld line in the player's zone.
+-- Only considers zone 1. Scans existing melds left→right and fills the first
+-- gap wide enough for a new meld. Falls back to right of rightmost, then left
+-- of leftmost on overflow. Empty zone: top edge of zone 1, laterally centered.
+function computeNewLinePosition(sColor, colorZones, rotY, dph)
+  local decode      = gt_DECODE_DIR[rotY]
+  local lateralAxis = decode[1]   -- "x" or "z"
+  local direction   = decode[2]   -- -1 or +1; also "toward center" sign on depthAxis
+  local depthAxis   = (lateralAxis == "x") and "z" or "x"
+  local cardGap     = gv_CARD_SIZE.x + 0.2   -- 3.2 units center-to-center between melds
+
+  -- Collect meld columns from zone 1: group face-up non-book objects by lateral
+  -- position (tolerance 1 unit = same column).  Track topmost depth per column.
+  local topmostScore = nil
+  local topmostDepth = nil
+  local columns      = {}   -- list of { lat, dep } one entry per meld column
+
+  local zone1 = colorZones.zones[1]
+  local ok, zoneObjs = pcall(function() return zone1.obj.getObjects() end)
+  if ok and zoneObjs then
+    for _, obj in ipairs(zoneObjs) do
+      if not obj.is_face_down and (obj.tag == "Card" or obj.tag == "Deck") then
+        local ok_o, opos = pcall(function() return obj.getPosition() end)
+        if ok_o and opos then
+          local lat = opos[lateralAxis]
+          local dep = opos[depthAxis]
+          -- Track global topmost (nearest board center)
+          local topScore = dep * direction
+          if topmostScore == nil or topScore > topmostScore then
+            topmostScore = topScore
+            topmostDepth = dep
+          end
+          -- Cluster into columns by lateral position
+          local found = false
+          for _, col in ipairs(columns) do
+            if math.abs(col.lat - lat) < 1.0 then
+              found = true
+              if dep * direction > col.dep * direction then col.dep = dep end
+              break
+            end
+          end
+          if not found then
+            table.insert(columns, { lat = lat, dep = dep })
+          end
+        end
+      end
+    end
+  end
+
+  -- Get zone 1 live geometry
+  local ok_p, z1p = pcall(function() return zone1.obj.getPosition() end)
+  local ok_s, z1s = pcall(function() return zone1.obj.getScale()    end)
+  local tableY    = (ok_p and z1p) and z1p.y or 1.0
+
+  local newPos = { x = 0, y = tableY, z = 0 }
+
+  if #columns > 0 then
+    -- Sort columns from leftmost → rightmost (ascending lat * direction)
+    table.sort(columns, function(a, b)
+      return a.lat * direction < b.lat * direction
+    end)
+
+    newPos[depthAxis] = topmostDepth
+
+    -- Scan left→right for a gap wide enough to insert a meld (>= 1.5 * cardGap)
+    local placedLat = nil
+    for i = 1, #columns - 1 do
+      local gap = (columns[i+1].lat - columns[i].lat) * direction
+      if gap >= cardGap * 1.5 then
+        placedLat = columns[i].lat + direction * cardGap
+        dph("gap between col " .. i .. " and " .. (i+1) .. ", placing at lat=" .. tostring(placedLat))
+        break
+      end
+    end
+
+    if not placedLat then
+      -- No gap: try right of rightmost
+      local candidateLat = columns[#columns].lat + direction * cardGap
+      local inBounds = true
+      if ok_p and z1p and ok_s and z1s then
+        local zoneLatHalf = ((lateralAxis == "x") and z1s.x or z1s.z) / 2
+        local zoneFarEdge = z1p[lateralAxis] + direction * zoneLatHalf
+        if (candidateLat - zoneFarEdge) * direction > 0 then inBounds = false end
+      end
+      if inBounds then
+        placedLat = candidateLat
+        dph("no gap; right of rightmost at lat=" .. tostring(placedLat))
+      else
+        -- Overflow: left of leftmost
+        placedLat = columns[1].lat - direction * cardGap
+        dph("overflow; left of leftmost at lat=" .. tostring(placedLat))
+      end
+    end
+
+    newPos[lateralAxis] = placedLat
+
+  else
+    -- Empty zone: 1.5 card-heights from top edge of zone 1, laterally centered
+    if ok_p and z1p and ok_s and z1s then
+      local depthScale  = (depthAxis == "z") and z1s.z or z1s.x
+      local zoneTopEdge = z1p[depthAxis] + direction * (depthScale / 2)
+      newPos[depthAxis]   = zoneTopEdge - direction * 1.5 * gv_CARD_SIZE.z
+      newPos[lateralAxis] = z1p[lateralAxis]
+      dph("empty zone: cardCenter=" .. tostring(newPos[depthAxis]))
+    elseif ok_p and z1p then
+      newPos.x = z1p.x
+      newPos.z = z1p.z
+      dph("empty zone fallback: zone1 center")
+    end
+  end
+
+  return newPos
+end
+
+--==============================================================================
+-- Lays out 3+ cards of a given rank from the player's hand onto the table.
+-- Adds to an existing meld if one exists; otherwise creates a new line.
+-- Requires 3+ cards of that rank and won't leave fewer than 2 cards in hand.
+function layoutHandRank(sColor, rank)
+  local function dph(str)
+    if gtDebugFlags["layouthand"] then
+      printToColor("[layouthand] " .. str, sColor)
+    end
+  end
+
+  dph("called for rank=" .. tostring(rank))
+
+  if not giPlayerCount or not objScoreZones[giPlayerCount] then
+    broadcastToColor("No layout defined for current player count", sColor)
+    return
+  end
+  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
+  if not colorZones or not colorZones.zones then
+    broadcastToColor("No score zones found for " .. sColor, sColor)
+    return
+  end
+
+  -- Reject wilds and 3s
+  if rank == "2" or rank == "3" or rank == "Joker" then
+    broadcastToColor("Cannot layout wilds or 3s", sColor)
+    return
+  end
+
+  -- Collect non-wild hand cards of this rank
+  local handCards = Player[sColor].getHandObjects()
+  local rankCards = {}
+  for _, card in ipairs(handCards) do
+    local cardColor, r, _ = cardDeets(card)
+    if r == rank and cardColor ~= "Wild" then
+      table.insert(rankCards, card)
+    end
+  end
+
+  dph("hand=" .. #handCards .. " rank=" .. rank .. " count=" .. #rankCards)
+
+  if #rankCards < 3 then
+    broadcastToColor("Need at least 3 of rank " .. rank .. " (have " .. #rankCards .. ")", sColor)
+    return
+  end
+  if (#handCards - #rankCards) < 2 then
+    broadcastToColor("Cannot play: would leave fewer than 2 cards in hand", sColor)
+    return
+  end
+
+  local rotY = gt_COLOR_ROT[sColor] or 0
+
+  -- Determine drop target: only target incomplete melds, not complete books (Deck >= 7)
+  local allTableCards = getTableCardsOfRank(sColor, rank)
+  local existingCards = {}
+  for _, obj in ipairs(allTableCards) do
+    local isBook = false
+    if obj.tag == "Deck" then
+      local ok, qty = pcall(function() return obj.getQuantity() end)
+      if ok and qty and qty >= 7 then isBook = true end
+    end
+    if not isBook then table.insert(existingCards, obj) end
+  end
+  local targetPos
+
+  if #existingCards > 0 then
+    -- Find the topmost (nearest-center) existing card as the anchor
+    local decode    = gt_DECODE_DIR[rotY]
+    local depthAxis = (decode[1] == "x") and "z" or "x"
+    local direction = decode[2]
+    local bestScore = nil
+    for _, ec in ipairs(existingCards) do
+      local ok, epos = pcall(function() return ec.getPosition() end)
+      if ok and epos then
+        local score = epos[depthAxis] * direction
+        if bestScore == nil or score > bestScore then
+          bestScore = score
+          targetPos = epos
+        end
+      end
+    end
+    if not targetPos then
+      local ok_fb, fb = pcall(function() return existingCards[1].getPosition() end)
+      if ok_fb and fb then targetPos = fb end
+    end
+    if not targetPos then
+      broadcastToColor("Could not read position of existing meld for rank " .. rank, sColor)
+      return
+    end
+    dph("adding to existing line, anchor depth=" .. tostring(targetPos[depthAxis]))
+  else
+    targetPos = computeNewLinePosition(sColor, colorZones, rotY, dph)
+    dph("new line at x=" .. tostring(targetPos.x) .. " z=" .. tostring(targetPos.z))
+  end
+
+  broadcastToColor("Laying out " .. #rankCards .. " card(s) of rank " .. rank, sColor)
+
+  -- Move cards to target one at a time
+  local t = 0
+  for _, card in ipairs(rankCards) do
+    local capturedCard = card
+    local capturedPos  = targetPos
+    Wait.time(function()
+      local ok = pcall(function() capturedCard.setPosition(capturedPos) end)
+      if not ok then dph("card gone before timer fired") end
+    end, t)
+    t = t + 0.3
+  end
+
+  -- After all placed, spread4 the full line (existing + new)
+  local capturedRank     = rank
+  local capturedPos      = targetPos
+  local capturedNewCards = rankCards
+  Wait.time(function()
+    -- Reset bSpreading in case a prior operation left it stuck
+    if playerStuff[sColor] then playerStuff[sColor].bSpreading = false end
+    local allCards = getTableCardsOfRank(sColor, capturedRank)
+    if #allCards == 0 then
+      -- Zone membership not yet registered; use the cards we just moved
+      dph("zone scan empty, using direct card list")
+      allCards = capturedNewCards
+    end
+    dph("spread4 for rank=" .. capturedRank .. " count=" .. #allCards)
+    if #allCards > 0 then
+      spread4(sColor, capturedPos, allCards)
+    end
+    broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
+  end, t + 1.0)
+end
+
+--==============================================================================
+-- Lays out all eligible ranks from the player's hand, one rank at a time.
+-- A rank is eligible if the player holds 3+ non-wild cards of that rank.
+function layoutHandAll(sColor)
+  local handCards = Player[sColor].getHandObjects()
+
+  -- Count non-wild cards per rank (exclude 2, 3, Joker)
+  local byRank   = {}
+  local rankOrder = {}
+  for _, card in ipairs(handCards) do
+    local cardColor, rank, _ = cardDeets(card)
+    if cardColor ~= "Wild" and rank ~= "3" then
+      if not byRank[rank] then
+        byRank[rank] = 0
+        table.insert(rankOrder, rank)
+      end
+      byRank[rank] = byRank[rank] + 1
+    end
+  end
+
+  -- Filter to ranks with 3+ cards
+  local eligible = {}
+  for _, rank in ipairs(rankOrder) do
+    if byRank[rank] >= 3 then
+      table.insert(eligible, rank)
+    end
+  end
+
+  if #eligible == 0 then
+    broadcastToColor("No eligible ranks to lay out (need 3+ of a rank)", sColor)
+    return
+  end
+
+  broadcastToColor("Laying out " .. #eligible .. " rank(s) from hand", sColor)
+
+  -- Schedule each rank: stagger by (count * 0.3 + 1.0 spread time + 0.5 buffer)
+  local t = 0
+  for _, rank in ipairs(eligible) do
+    local capturedRank = rank
+    Wait.time(function()
+      layoutHandRank(sColor, capturedRank)
+    end, t)
+    t = t + (byRank[rank] * 0.3) + 1.5
+  end
 end
 
 --==============================================================================
@@ -3974,6 +4306,20 @@ end
 function onObjectSpawn(obj)
     obj.addContextMenuItem('Layout Pretty', function(x) spread3("s",x,1) end, false)
     obj.addContextMenuItem('Layout TowardCam', function(x) spread3("s",x,0) end, false)
+    -- Card-only items: do NOT add these to all objects — hand zone scripting zones
+    -- break if they receive more than the 2 items above.
+    if obj.tag == "Card" then
+      obj.addContextMenuItem('Play Hand', function(playerColor)
+        autoPlayMatchingCards(playerColor)
+      end, false)
+      obj.addContextMenuItem('Layout Hand', function(playerColor)
+        local _, rank, _ = cardDeets(obj)
+        layoutHandRank(playerColor, rank)
+      end, false)
+      obj.addContextMenuItem('Layout All Hand', function(playerColor)
+        layoutHandAll(playerColor)
+      end, false)
+    end
 end
 
 function findInTable2 (tab, target)
