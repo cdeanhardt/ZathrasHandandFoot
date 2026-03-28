@@ -3560,18 +3560,20 @@ function getTableCardsOfRank(sColor, rank)
     local ok, zoneObjs = pcall(function() return scoreZone.obj.getObjects() end)
     if ok and zoneObjs then
       for _, obj in ipairs(zoneObjs) do
-        if not obj.is_face_down then
-          if obj.tag == "Card" then
-            local _, r, _ = cardDeets(obj)
-            if r == rank then table.insert(result, obj) end
-          elseif obj.tag == "Deck" then
-            local deckCards = obj.getObjects()
-            if #deckCards > 0 then
-              local _, r, _ = cardDeets(deckCards[1])
+        pcall(function()
+          if not obj.is_face_down then
+            if obj.tag == "Card" then
+              local _, r, _ = cardDeets(obj)
               if r == rank then table.insert(result, obj) end
+            elseif obj.tag == "Deck" then
+              local ok_dc, deckCards = pcall(function() return obj.getObjects() end)
+              if ok_dc and deckCards and #deckCards > 0 then
+                local _, r, _ = cardDeets(deckCards[1])
+                if r == rank then table.insert(result, obj) end
+              end
             end
           end
-        end
+        end)
       end
     end
   end
@@ -3846,8 +3848,13 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
     Wait.time(function()
       local allCards = getTableCardsOfRank(sColor, capturedRank)
       dph("layout pretty for rank " .. capturedRank .. ": found " .. #allCards .. " object(s) on table")
-      if #allCards > 0 then
-        spread4(sColor, capturedTarget.pos, allCards)
+      local safeCards = {}
+      for _, obj in ipairs(allCards) do
+        local ok = pcall(function() obj.getPosition() end)
+        if ok then table.insert(safeCards, obj) end
+      end
+      if #safeCards > 0 then
+        spread4(sColor, capturedTarget.pos, safeCards)
       end
     end, t)
     t = t + 1.5
@@ -4115,28 +4122,33 @@ function layoutHandRank(sColor, rank, skipRedThrees)
   -- Explicitly exclude complete books (Deck >= 7) so they are never passed to spread4.
   -- Using captured references is unsafe: cards landing on the meld cause TTS to merge
   -- them into a new Deck object, invalidating the old individual card references.
-  local capturedRank     = rank
-  local capturedPos      = targetPos
-  local capturedNewCards = rankCards
+  local capturedRank = rank
+  local capturedPos  = targetPos
   Wait.time(function()
     if playerStuff[sColor] then playerStuff[sColor].bSpreading = false end
     local freshScan = getTableCardsOfRank(sColor, capturedRank)
     local allCards  = {}
     for _, obj in ipairs(freshScan) do
-      local isBook = false
-      if obj.tag == "Deck" then
-        local ok, qty = pcall(function() return obj.getQuantity() end)
-        if ok and qty and qty >= 7 then isBook = true end
-      end
-      if not isBook then table.insert(allCards, obj) end
+      pcall(function()
+        local isBook = false
+        if obj.tag == "Deck" then
+          local ok, qty = pcall(function() return obj.getQuantity() end)
+          if ok and qty and qty >= 7 then isBook = true end
+        end
+        if not isBook then table.insert(allCards, obj) end
+      end)
     end
-    if #allCards == 0 then
-      dph("zone scan empty, using direct card list")
-      allCards = capturedNewCards
+    -- Validate: drop stale object references so spread4's table.sort won't crash.
+    -- (Cards that landed on an existing meld get merged into a new Deck by TTS,
+    -- invalidating the old Card refs captured before the Wait.time.)
+    local safeCards = {}
+    for _, obj in ipairs(allCards) do
+      local ok = pcall(function() obj.getPosition() end)
+      if ok then table.insert(safeCards, obj) end
     end
-    dph("spread4 for rank=" .. capturedRank .. " count=" .. #allCards)
-    if #allCards > 0 then
-      spread4(sColor, capturedPos, allCards)
+    dph("spread4 for rank=" .. capturedRank .. " safeCards=" .. #safeCards)
+    if #safeCards > 0 then
+      spread4(sColor, capturedPos, safeCards)
     end
     broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
   end, t + 1.0)
@@ -4245,53 +4257,68 @@ function checkAndMoveBooks(sColor)
     if geo[3].pos[lateralAxis] * direction >= 0 then rightIdx = 3 else leftIdx = 3 end
   end
 
-  -- Count existing complete books in a side zone.
-  local function countBooks(zi)
-    if not zi or not geo[zi] then return 0 end
+  -- Collect the lateral positions of ALL existing objects in a side zone.
+  -- Used to detect collisions (e.g. face-down shuffle deck sitting in the zone).
+  local function getOccupied(zi)
+    local occ = {}
+    if not zi or not geo[zi] then return occ end
     local ok, objs = pcall(function() return colorZones.zones[zi].obj.getObjects() end)
-    if not ok or not objs then return 0 end
-    local n = 0
+    if not ok or not objs then return occ end
     for _, obj in ipairs(objs) do
-      if not obj.is_face_down and obj.tag == "Deck" then
-        local ok_q, qty = pcall(function() return obj.getQuantity() end)
-        if ok_q and qty and qty >= 7 then n = n + 1 end
-      end
+      local ok_p, p = pcall(function() return obj.getPosition() end)
+      if ok_p and p then table.insert(occ, p[lateralAxis]) end
     end
-    return n
+    return occ
+  end
+
+  -- Returns true if `lat` is within bookGap of any entry in `occupied`.
+  local function isBlocked(lat, occupied)
+    for _, occ in ipairs(occupied) do
+      if math.abs(lat - occ) < bookGap * 0.9 then return true end
+    end
+    return false
   end
 
   -- Lateral coordinate of the n-th slot in a zone.
-  -- rightFill=true  → zone fills in `direction` direction (left→right for player)
-  -- rightFill=false → zone fills in `-direction` direction (right→left for player)
-  -- In both cases, slot 1 is at the inner edge (closest to board center).
+  -- rightFill=true  → fills in `direction` (left→right for player)
+  -- rightFill=false → fills in `-direction` (right→left for player)
   local function slotLat(zi, n, rightFill)
     local g = geo[zi]; if not g then return nil end
-    local innerEdge, fillDir
-    if rightFill then
-      innerEdge = g.pos[lateralAxis] - direction * g.latHalf
-      fillDir   = direction
-    else
-      innerEdge = g.pos[lateralAxis] + direction * g.latHalf
-      fillDir   = -direction
-    end
+    local innerEdge = rightFill
+      and (g.pos[lateralAxis] - direction * g.latHalf)
+       or (g.pos[lateralAxis] + direction * g.latHalf)
+    local fillDir = rightFill and direction or -direction
     return innerEdge + fillDir * (n - 0.5) * bookGap
   end
 
-  -- Check that a lateral coordinate is within the zone's bounds.
-  local function slotValid(zi, lat, rightFill)
+  -- Returns true if `lat` is within the zone's outer boundary.
+  local function slotInBounds(zi, lat, rightFill)
     local g = geo[zi]; if not g then return false end
-    local outerEdge
-    if rightFill then
-      outerEdge = g.pos[lateralAxis] + direction * g.latHalf
-      return (lat - outerEdge) * direction <= 0
-    else
-      outerEdge = g.pos[lateralAxis] - direction * g.latHalf
-      return (lat - outerEdge) * (-direction) <= 0
-    end
+    local outerEdge = rightFill
+      and (g.pos[lateralAxis] + direction * g.latHalf)
+       or (g.pos[lateralAxis] - direction * g.latHalf)
+    local fillDir = rightFill and direction or -direction
+    return (lat - outerEdge) * fillDir <= 0
   end
 
-  local nRight = countBooks(rightIdx)
-  local nLeft  = countBooks(leftIdx)
+  -- Scan slots from n=1 upward, skipping any that are out-of-bounds or blocked
+  -- by an existing object.  Reserves the chosen slot by appending to `occupied`.
+  local function findSlot(zi, rightFill, occupied)
+    if not zi then return nil end
+    for n = 1, 50 do
+      local lat = slotLat(zi, n, rightFill)
+      if not lat or not slotInBounds(zi, lat, rightFill) then return nil end
+      if not isBlocked(lat, occupied) then
+        table.insert(occupied, lat)   -- reserve for subsequent books
+        return lat
+      end
+    end
+    return nil
+  end
+
+  -- Seed occupied lists with every existing object already in each side zone.
+  local occRight = getOccupied(rightIdx)
+  local occLeft  = getOccupied(leftIdx)
 
   -- Depth (forward/back) and y positions for placement in the side zones.
   local refGeo = geo[rightIdx] or geo[leftIdx]
@@ -4304,35 +4331,25 @@ function checkAndMoveBooks(sColor)
   local ok1, z1objs = pcall(function() return colorZones.zones[1].obj.getObjects() end)
   if not ok1 or not z1objs then return end
   for _, obj in ipairs(z1objs) do
-    if not obj.is_face_down and obj.tag == "Deck" then
-      local ok_q, qty = pcall(function() return obj.getQuantity() end)
-      if ok_q and qty and qty >= 7 then
-        table.insert(zone1Books, obj)
+    pcall(function()
+      if not obj.is_face_down and obj.tag == "Deck" then
+        local ok_q, qty = pcall(function() return obj.getQuantity() end)
+        if ok_q and qty and qty >= 7 then
+          table.insert(zone1Books, obj)
+        end
       end
-    end
+    end)
   end
 
   if #zone1Books == 0 then return end
 
-  -- Move each zone-1 book to the next available side-zone slot.
+  -- Move each zone-1 book to the next available side-zone slot,
+  -- skipping any position that would overlap an existing object.
   local delay = 0
   for _, book in ipairs(zone1Books) do
-    local targetLat = nil
-
-    -- Prefer right zone (left-to-right fill)
-    if rightIdx then
-      local lat = slotLat(rightIdx, nRight + 1, true)
-      if lat and slotValid(rightIdx, lat, true) then
-        targetLat = lat; nRight = nRight + 1
-      end
-    end
-    -- Fall back to left zone (right-to-left fill)
-    if not targetLat and leftIdx then
-      local lat = slotLat(leftIdx, nLeft + 1, false)
-      if lat and slotValid(leftIdx, lat, false) then
-        targetLat = lat; nLeft = nLeft + 1
-      end
-    end
+    -- Prefer right zone (left-to-right fill); fall back to left zone.
+    local targetLat = findSlot(rightIdx, true,  occRight)
+                   or findSlot(leftIdx,  false, occLeft)
 
     if targetLat then
       local captured = book
