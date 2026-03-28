@@ -2240,6 +2240,32 @@ function cardDeets(oneCard)
     return "Red", shortName, shortSuit
   end
 end
+
+--==============================================================================
+-- Game Rules helpers
+-- Pure functions with no TTS calls.  These encode what is and isn't legal.
+
+-- True for wildcard ranks (2 or Joker).
+function isWild(rank)
+  return rank == "2" or rank == "Joker"
+end
+
+-- True for ranks that can form melds (not wilds, not 3s).
+function isEligibleRank(rank)
+  return rank ~= "2" and rank ~= "3" and rank ~= "Joker"
+end
+
+-- True if cards[] could form a valid opening meld (3+ total, 2+ non-wild).
+-- cards[] is a list of {rank, suit, color} or {rank, color} entries.
+function canFormMeld(cards)
+  if #cards < 3 then return false end
+  local nonWild = 0
+  for _, c in ipairs(cards) do
+    if c.color ~= "Wild" then nonWild = nonWild + 1 end
+  end
+  return nonWild >= 2
+end
+
 --==============================================================================
 function tablepush(tab, el)
   debug("table push " .. dump(el), "discard")
@@ -3505,11 +3531,169 @@ function nvl(val, ifnil)
   end
 end
 
+--==============================================================================
+-- Zone / player accessor helpers
+-- Use these instead of spelling out objScoreZones[giPlayerCount]["Colors"][sColor]
+-- everywhere.  All return nil (with no crash) when zones aren't initialised yet.
+
+-- Returns the colorZones table {footPos, zones[]} for sColor, or nil.
+function getPlayerZones(sColor)
+  if not giPlayerCount or not objScoreZones[giPlayerCount] then return nil end
+  local cz = objScoreZones[giPlayerCount]["Colors"][sColor]
+  if not cz or not cz.zones then return nil end
+  return cz
+end
+
+-- Returns the zone-entry table {obj, scl, pos} for zone index zi (default 1).
+function getPlayerZone(sColor, zi)
+  local cz = getPlayerZones(sColor)
+  if not cz then return nil end
+  return cz.zones[zi or 1]
+end
+
+-- Returns the Y rotation for sColor's hand zone (0/90/180/270).
+function getPlayerRotY(sColor)
+  return gt_COLOR_ROT[sColor] or 0
+end
+
+-- Returns the decode-dir entry {lateralAxis, direction} for sColor.
+function getPlayerDecodeDir(sColor)
+  return gt_DECODE_DIR[getPlayerRotY(sColor)]
+end
+
+--==============================================================================
+-- State Query API
+-- Pure functions that describe the current game state as plain Lua tables.
+-- These have no side effects and do not move or animate anything.
+-- A future decision engine can call these freely to reason about the board.
+
+-- Returns a list of {rank, suit, color, obj} for every card in sColor's hand.
+-- Wilds are included.  'obj' is the live TTS object reference.
+function getHandCards(sColor)
+  local result = {}
+  local ok, hand = pcall(function() return Player[sColor].getHandObjects() end)
+  if not ok or not hand then return result end
+  for _, card in ipairs(hand) do
+    pcall(function()
+      local c, r, s = cardDeets(card)
+      table.insert(result, {rank=r, suit=s, color=c, obj=card})
+    end)
+  end
+  return result
+end
+
+-- Returns a list of {rank, isBook, obj, pos} for every meld/book in sColor's
+-- score zones.  'isBook' is true when the Deck has 7+ cards.
+-- Red-3 stacks (rank "3") are included so callers can filter as needed.
+function getMelds(sColor)
+  local result = {}
+  local colorZones = getPlayerZones(sColor)
+  if not colorZones then return result end
+  local seen = {}
+  for _, scoreZone in ipairs(colorZones.zones) do
+    local ok, objs = pcall(function() return scoreZone.obj.getObjects() end)
+    if ok and objs then
+      for _, obj in ipairs(objs) do
+        pcall(function()
+          if obj.is_face_down then return end
+          local guid = obj.getGUID()
+          if seen[guid] then return end
+          seen[guid] = true
+          local rank, pos
+          local isBook = false
+          if obj.tag == "Card" then
+            local _, r, _ = cardDeets(obj)
+            rank = r
+            pos  = obj.getPosition()
+          elseif obj.tag == "Deck" then
+            local ok_d, cards = pcall(function() return obj.getObjects() end)
+            if ok_d and cards and #cards > 0 then
+              local _, r, _ = cardDeets(cards[1])
+              rank = r
+            end
+            local ok_q, qty = pcall(function() return obj.getQuantity() end)
+            if ok_q and qty and qty >= 7 then isBook = true end
+            pos = obj.getPosition()
+          end
+          if rank then
+            table.insert(result, {rank=rank, isBook=isBook, obj=obj, pos=pos})
+          end
+        end)
+      end
+    end
+  end
+  return result
+end
+
+-- Returns a list of rank strings that the player can legally meld from hand:
+-- 3+ non-wild cards of that rank, and playing them won't leave fewer than 2
+-- total cards in hand.  Wilds and 3s are always excluded.
+function getEligibleRanks(sColor)
+  local hand = getHandCards(sColor)
+  local byRank = {}
+  local total  = #hand
+  for _, entry in ipairs(hand) do
+    if entry.color ~= "Wild" and entry.rank ~= "3" then
+      byRank[entry.rank] = (byRank[entry.rank] or 0) + 1
+    end
+  end
+  local result = {}
+  for rank, cnt in pairs(byRank) do
+    if cnt >= 3 and (total - cnt) >= 2 then
+      table.insert(result, rank)
+    end
+  end
+  return result
+end
+
+-- Returns {ok=bool, reason=string}.  Checks whether sColor can meld 'rank'
+-- from hand right now (3+ cards available, won't leave fewer than 2 in hand).
+function canMeld(sColor, rank)
+  if not isEligibleRank(rank) then
+    return {ok=false, reason="cannot meld wilds or 3s"}
+  end
+  local hand  = getHandCards(sColor)
+  local total = #hand
+  local cnt   = 0
+  for _, entry in ipairs(hand) do
+    if entry.rank == rank and entry.color ~= "Wild" then cnt = cnt + 1 end
+  end
+  if cnt < 3 then
+    return {ok=false, reason="only " .. cnt .. " of rank " .. rank .. " in hand (need 3)"}
+  end
+  if (total - cnt) < 2 then
+    return {ok=false, reason="would leave fewer than 2 cards in hand"}
+  end
+  return {ok=true, reason="ok"}
+end
+
+-- Returns the position {x,y,z} of the topmost (nearest-center) non-book card
+-- in the existing meld for sColor's 'rank', or nil if no such meld exists.
+function getMeldAnchor(sColor, rank)
+  local melds = getMelds(sColor)
+  local decode = getPlayerDecodeDir(sColor)
+  if not decode then return nil end
+  local lateralAxis = decode[1]
+  local direction   = decode[2]
+  local depthAxis   = (lateralAxis == "x") and "z" or "x"
+  local bestScore, bestPos = nil, nil
+  for _, meld in ipairs(melds) do
+    if meld.rank == rank and not meld.isBook and meld.pos then
+      local score = meld.pos[depthAxis] * direction
+      if bestScore == nil or score > bestScore then
+        bestScore = score
+        bestPos   = meld.pos
+      end
+    end
+  end
+  return bestPos
+end
+
+--==============================================================================
 function objectInScoreZone(oThing, sColor)
   if not sColor then return false end
-  if not objScoreZones[giPlayerCount] then return false end
-  local colorEntry = objScoreZones[giPlayerCount]["Colors"][sColor]
-  if not colorEntry or not colorEntry.zones then return false end
+  local colorEntry = getPlayerZones(sColor)
+  if not colorEntry then return false end
   for _, scoreZone in ipairs(colorEntry.zones) do
     local ok, inZone = pcall(function() return objectInZone(oThing, scoreZone.obj) end)
     if ok and inZone then
@@ -3553,9 +3737,8 @@ end
 -- Returns the list of objects (Cards and Decks containing that rank).
 function getTableCardsOfRank(sColor, rank)
   local result = {}
-  if not objScoreZones[giPlayerCount] then return result end
-  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
-  if not colorZones or not colorZones.zones then return result end
+  local colorZones = getPlayerZones(sColor)
+  if not colorZones then return result end
   for _, scoreZone in ipairs(colorZones.zones) do
     local ok, zoneObjs = pcall(function() return scoreZone.obj.getObjects() end)
     if ok and zoneObjs then
@@ -3584,8 +3767,7 @@ end
 -- Returns the world position for the red-3 meld: just below the player's
 -- face-down foot pile (away from board center, toward the player's edge).
 function getRedThreeMeldPos(sColor)
-  local rotY   = gt_COLOR_ROT[sColor] or 0
-  local decode = gt_DECODE_DIR[rotY]
+  local decode = getPlayerDecodeDir(sColor)
   if not decode then return nil end
   local lateralAxis = decode[1]
   local direction   = decode[2]
@@ -3593,21 +3775,19 @@ function getRedThreeMeldPos(sColor)
 
   -- Scan score zones for the face-down foot pile to get its actual world position.
   local footPilePos = nil
-  if giPlayerCount and objScoreZones[giPlayerCount] then
-    local cz = objScoreZones[giPlayerCount]["Colors"][sColor]
-    if cz and cz.zones then
-      for _, sz in ipairs(cz.zones) do
-        local ok, objs = pcall(function() return sz.obj.getObjects() end)
-        if ok and objs then
-          for _, obj in ipairs(objs) do
-            if obj.is_face_down then
-              local ok_p, p = pcall(function() return obj.getPosition() end)
-              if ok_p and p then footPilePos = p; break end
-            end
+  local cz_foot = getPlayerZones(sColor)
+  if cz_foot then
+    for _, sz in ipairs(cz_foot.zones) do
+      local ok, objs = pcall(function() return sz.obj.getObjects() end)
+      if ok and objs then
+        for _, obj in ipairs(objs) do
+          if obj.is_face_down then
+            local ok_p, p = pcall(function() return obj.getPosition() end)
+            if ok_p and p then footPilePos = p; break end
           end
         end
-        if footPilePos then break end
       end
+      if footPilePos then break end
     end
   end
   -- Fallback: use the dealing-time footPos stored in playerStuff
@@ -3708,13 +3888,8 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
   dph("giPlayerCount = " .. tostring(giPlayerCount))
   dph("giPlayerCount = " .. tostring(giPlayerCount))
 
-  if not objScoreZones[giPlayerCount] then
-    dph("FAIL: no objScoreZones entry for player count " .. tostring(giPlayerCount))
-    broadcastToColor("No layout defined for current player count", sColor)
-    return
-  end
-  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
-  if not colorZones or not colorZones.zones then
+  local colorZones = getPlayerZones(sColor)
+  if not colorZones then
     dph("FAIL: no colorZones or zones for " .. sColor)
     broadcastToColor("No score zones found for " .. sColor, sColor)
     return
@@ -3739,7 +3914,7 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
           elseif obj.tag == "Card" then
             local cardColor, rank, _ = cardDeets(obj)
             dph("  Card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
-            if cardColor ~= "Wild" and rank ~= "3" and not meldTargets[rank] then
+            if isEligibleRank(rank) and cardColor ~= "Wild" and not meldTargets[rank] then
               local ok_pos, objPos = pcall(function() return obj.getPosition() end)
               if ok_pos and objPos then
                 meldTargets[rank] = {obj=obj, pos=objPos}
@@ -3755,7 +3930,7 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
               for _, dc in ipairs(deckCards) do
                 local cardColor, rank, _ = cardDeets(dc)
                 dph("  Deck card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
-                if cardColor ~= "Wild" and rank ~= "3" then
+                if isEligibleRank(rank) and cardColor ~= "Wild" then
                   local ok_pos, objPos = pcall(function() return obj.getPosition() end)
                   if ok_pos and objPos then
                     if isBook then
@@ -3803,7 +3978,7 @@ function autoPlayMatchingCards(sColor, skipRedThrees)
   for _, card in ipairs(handCards) do
     local cardColor, rank, _ = cardDeets(card)
     dph("  hand card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor) .. " playable=" .. tostring(cardColor ~= "Wild" and rankTargets[rank] ~= nil))
-    if cardColor ~= "Wild" and rank ~= "3" and rankTargets[rank] then
+    if isEligibleRank(rank) and cardColor ~= "Wild" and rankTargets[rank] then
       if not byRank[rank] then
         byRank[rank] = {}
         table.insert(rankOrder, rank)
@@ -4022,18 +4197,14 @@ function layoutHandRank(sColor, rank, skipRedThrees)
 
   dph("called for rank=" .. tostring(rank))
 
-  if not giPlayerCount or not objScoreZones[giPlayerCount] then
-    broadcastToColor("No layout defined for current player count", sColor)
-    return
-  end
-  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
-  if not colorZones or not colorZones.zones then
+  local colorZones = getPlayerZones(sColor)
+  if not colorZones then
     broadcastToColor("No score zones found for " .. sColor, sColor)
     return
   end
 
   -- Reject wilds and 3s
-  if rank == "2" or rank == "3" or rank == "Joker" then
+  if not isEligibleRank(rank) then
     broadcastToColor("Cannot layout wilds or 3s", sColor)
     return
   end
@@ -4059,7 +4230,7 @@ function layoutHandRank(sColor, rank, skipRedThrees)
     return
   end
 
-  local rotY = gt_COLOR_ROT[sColor] or 0
+  local rotY = getPlayerRotY(sColor)
 
   -- Determine drop target: only target incomplete melds, not complete books (Deck >= 7)
   local allTableCards = getTableCardsOfRank(sColor, rank)
@@ -4164,29 +4335,8 @@ function layoutHandAll(sColor, skipRedThrees)
     return
   end
 
-  local handCards = Player[sColor].getHandObjects()
-
-  -- Count non-wild cards per rank (exclude 2, 3, Joker)
-  local byRank   = {}
-  local rankOrder = {}
-  for _, card in ipairs(handCards) do
-    local cardColor, rank, _ = cardDeets(card)
-    if cardColor ~= "Wild" and rank ~= "3" then
-      if not byRank[rank] then
-        byRank[rank] = 0
-        table.insert(rankOrder, rank)
-      end
-      byRank[rank] = byRank[rank] + 1
-    end
-  end
-
-  -- Filter to ranks with 3+ cards
-  local eligible = {}
-  for _, rank in ipairs(rankOrder) do
-    if byRank[rank] >= 3 then
-      table.insert(eligible, rank)
-    end
-  end
+  -- Use getEligibleRanks: 3+ non-wild of rank, won't leave fewer than 2 in hand
+  local eligible = getEligibleRanks(sColor)
 
   if #eligible == 0 then
     broadcastToColor("No eligible ranks to lay out (need 3+ of a rank)", sColor)
@@ -4212,14 +4362,12 @@ end
 -- The zone to the player's right fills left-to-right (inner edge outward).
 -- The zone to the player's left fills right-to-left (inner edge outward).
 function checkAndMoveBooks(sColor)
-  if not giPlayerCount or not objScoreZones[giPlayerCount] then return end
-  local colorZones = objScoreZones[giPlayerCount]["Colors"][sColor]
-  if not colorZones or not colorZones.zones then return end
+  local colorZones = getPlayerZones(sColor)
+  if not colorZones then return end
   if not colorZones.zones[1] or not colorZones.zones[1].obj then return end
   if not colorZones.zones[2] or not colorZones.zones[2].obj then return end
 
-  local rotY = gt_COLOR_ROT[sColor] or 0
-  local decode = gt_DECODE_DIR[rotY]
+  local decode = getPlayerDecodeDir(sColor)
   if not decode then return end
   local lateralAxis = decode[1]
   local direction   = decode[2]
@@ -4640,7 +4788,7 @@ function onObjectSpawn(obj)
     obj.addContextMenuItem('Layout Pretty', function(x) spread3("s",x,1) end, false)
     obj.addContextMenuItem('Layout TowardCam', function(x) spread3("s",x,0) end, false)
     -- Card-only items: do NOT add these to all objects — hand zone scripting zones
-    -- break if they receive more than the 2 items above.
+    -- break if they receive more than 3 items total (2 from here + 1 from onLoad).
     if obj.tag == "Card" then
       obj.addContextMenuItem('Play Hand', function(playerColor)
         autoPlayMatchingCards(playerColor)
@@ -5383,7 +5531,8 @@ function checkFootNote(sColor, iCheckCount)
       local p = getSortedSeatedPlayers()
       giPlayerCount = #p
     end
-    for _, scoreZone in ipairs(objScoreZones[giPlayerCount]["Colors"][sColor].zones) do
+    local czFoot = getPlayerZones(sColor)
+    for _, scoreZone in ipairs(czFoot and czFoot.zones or {}) do
         for _, occupyingObject in ipairs(scoreZone.obj.getObjects()) do
           if ( (occupyingObject.tag == "Deck" or occupyingObject.tag == "Card" ) and occupyingObject.is_face_down ) then
             bFootExists = true
