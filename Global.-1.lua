@@ -798,6 +798,39 @@ function SaveScores()
 end
 
 -- =============================================================================
+-- ActionQueue: lightweight sequencer for multi-step async operations.
+--
+-- Usage:
+--   local q = ActionQueue.new()
+--   q:push(function() ... end, 0.5)   -- step fires 0.5s after previous
+--   q:push(function() ... end, 1.0)
+--   q:run()
+--
+-- The queue accumulates absolute Wait.time offsets and fires each step in order.
+-- Steps are closures; the queue holds no TTS object references itself.
+ActionQueue = {}
+ActionQueue.__index = ActionQueue
+
+function ActionQueue.new()
+  return setmetatable({steps={}, t=0}, ActionQueue)
+end
+
+-- Add a step: fn will be called `delay` seconds after the previous step's
+-- scheduled time (or after q:run() is called for the first step).
+function ActionQueue:push(fn, delay)
+  self.t = self.t + (delay or 0)
+  table.insert(self.steps, {fn=fn, t=self.t})
+end
+
+-- Schedule all queued steps via Wait.time. Safe to call on an empty queue.
+function ActionQueue:run()
+  for _, step in ipairs(self.steps) do
+    local captured = step.fn
+    Wait.time(captured, step.t)
+  end
+end
+
+-- =============================================================================
 function onSave()
   debug("saved-----------", "loaded")
   local t = {
@@ -1309,6 +1342,22 @@ function onLoad(saved_data)
                   drawcountqueued=false,
                   footReminder=""},
     }
+
+    -- Establish playerPrefs / playerState as named views into playerStuff.
+    -- All three names reference the SAME per-player table for now so existing
+    -- code using playerStuff[color] continues to work unchanged.
+    --
+    -- Intended field groupings (for new engine code and future split):
+    --   playerPrefs[color]:  num, bShowFootNotes, bQueuedFootNoteCheck,
+    --     bScoreVisible, bAlign, bAutoLayout, nick, sSortMetaOrder,
+    --     bSortAceHigh, bSortLowLeft, bReallySort, iSortWaiter
+    --   playerState[color]:  bSpreading, bSpreadQueued, bMaskActions,
+    --     drawcount, drawcountdisc, drawcountqueued, footPos, footReminder
+    --
+    -- Full field-level separation (metatable proxy) is deferred until a
+    -- dedicated audit/test pass can cover all ~100 playerStuff call sites.
+    playerPrefs = playerStuff
+    playerState = playerStuff
   end
     processSortCommand("White", playerStuff["White"].sSortMetaOrder)
     processSortCommand("Red", playerStuff["Red"].sSortMetaOrder)
@@ -3871,173 +3920,137 @@ function handleRedThrees(sColor, callback, depth)
   end, t + 0.5)
 end
 
--- short delay between each so queueSpread can finish before the next card lands.
-function autoPlayMatchingCards(sColor, skipRedThrees)
-  -- Handle red 3s first; re-enter with skipRedThrees=true once done.
-  if not skipRedThrees then
-    handleRedThrees(sColor, function() autoPlayMatchingCards(sColor, true) end)
-    return
-  end
-  local function dph(str)
-    if gtDebugFlags["playhand"] then
-      printToColor("[playhand] " .. str, sColor)
-    end
-  end
-
-  printToColor("[playhand] function called", sColor)
-  dph("giPlayerCount = " .. tostring(giPlayerCount))
-  dph("giPlayerCount = " .. tostring(giPlayerCount))
-
+--==============================================================================
+-- planAutoPlay: pure decision layer for "Play Hand".
+-- Scans the table and hand; returns a move list or a failure result.
+-- Returns {ok=false, reason=string} or
+--   {ok=true, moves=[{rank, cards=[], target={obj,pos}}], totalCards=n}
+function planAutoPlay(sColor)
   local colorZones = getPlayerZones(sColor)
   if not colorZones then
-    dph("FAIL: no colorZones or zones for " .. sColor)
-    broadcastToColor("No score zones found for " .. sColor, sColor)
-    return
+    return {ok=false, reason="No score zones found for " .. sColor}
   end
-  dph("colorZones found, zone count = " .. #colorZones.zones)
 
-  -- Build rank target map: incomplete melds preferred, complete books as fallback.
-  -- A complete book is a Deck with 7+ cards.
-  local meldTargets = {}  -- rank -> {obj, pos}: incomplete face-up melds only
-  local bookTargets = {}  -- rank -> {obj, pos}: complete books (fallback)
-  for zi, scoreZone in ipairs(colorZones.zones) do
+  -- Build rank target map from score zones
+  local meldTargets = {}
+  local bookTargets = {}
+  for _, scoreZone in ipairs(colorZones.zones) do
     local ok, zoneObjs = pcall(function() return scoreZone.obj.getObjects() end)
-    if not ok or not zoneObjs then
-      dph("zone " .. zi .. " is nil or invalid, skipping")
-    else
-      dph("zone " .. zi .. " has " .. #zoneObjs .. " object(s)")
+    if ok and zoneObjs then
       for _, obj in ipairs(zoneObjs) do
-        -- Wrap per-object access: stale references throw "Object reference not set"
-        local ok_obj = pcall(function()
-          if obj.is_face_down then
-            dph("  -> skipping face-down object")
-          elseif obj.tag == "Card" then
+        pcall(function()
+          if obj.is_face_down then return end
+          if obj.tag == "Card" then
             local cardColor, rank, _ = cardDeets(obj)
-            dph("  Card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
             if isEligibleRank(rank) and cardColor ~= "Wild" and not meldTargets[rank] then
-              local ok_pos, objPos = pcall(function() return obj.getPosition() end)
-              if ok_pos and objPos then
-                meldTargets[rank] = {obj=obj, pos=objPos}
-                dph("  -> meld target: " .. rank)
-              end
+              local ok_pos, pos = pcall(function() return obj.getPosition() end)
+              if ok_pos and pos then meldTargets[rank] = {obj=obj, pos=pos} end
             end
           elseif obj.tag == "Deck" then
-            local ok_qty, qty   = pcall(function() return obj.getQuantity() end)
-            local ok_dc, deckCards = pcall(function() return obj.getObjects() end)
-            if ok_dc and deckCards then
+            local ok_qty, qty = pcall(function() return obj.getQuantity() end)
+            local ok_dc, dc   = pcall(function() return obj.getObjects() end)
+            if ok_dc and dc and #dc > 0 then
               local isBook = ok_qty and qty and qty >= 7
-              dph("  Deck qty=" .. tostring(qty) .. " isBook=" .. tostring(isBook))
-              for _, dc in ipairs(deckCards) do
-                local cardColor, rank, _ = cardDeets(dc)
-                dph("  Deck card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor))
-                if isEligibleRank(rank) and cardColor ~= "Wild" then
-                  local ok_pos, objPos = pcall(function() return obj.getPosition() end)
-                  if ok_pos and objPos then
-                    if isBook then
-                      if not bookTargets[rank] then
-                        bookTargets[rank] = {obj=obj, pos=objPos}
-                        dph("  -> book fallback target: " .. rank)
-                      end
-                    else
-                      if not meldTargets[rank] then
-                        meldTargets[rank] = {obj=obj, pos=objPos}
-                        dph("  -> meld target from deck: " .. rank)
-                      end
-                    end
+              local cardColor, rank, _ = cardDeets(dc[1])
+              if isEligibleRank(rank) and cardColor ~= "Wild" then
+                local ok_pos, pos = pcall(function() return obj.getPosition() end)
+                if ok_pos and pos then
+                  if isBook then
+                    if not bookTargets[rank] then bookTargets[rank] = {obj=obj, pos=pos} end
+                  else
+                    if not meldTargets[rank] then meldTargets[rank] = {obj=obj, pos=pos} end
                   end
-                  break
                 end
               end
             end
           end
         end)
-        if not ok_obj then dph("  -> skipping stale object reference") end
       end
     end
   end
 
-  -- Merge: prefer meld target; use book target only if no meld exists
   local rankTargets = {}
   for rank, t in pairs(meldTargets) do rankTargets[rank] = t end
   for rank, t in pairs(bookTargets) do
-    if not rankTargets[rank] then
-      rankTargets[rank] = t
-      dph("  rank " .. rank .. " using book fallback")
-    end
+    if not rankTargets[rank] then rankTargets[rank] = t end
   end
 
-  local rankList = ""
-  for r, _ in pairs(rankTargets) do rankList = rankList .. r .. " " end
-  dph("ranks on table: [" .. rankList .. "]")
-
-  -- Find non-wild hand cards whose rank is already on the table, grouped by rank
-  local byRank = {}
-  local rankOrder = {}
+  -- Find matching hand cards, grouped by rank
+  local byRank, rankOrder = {}, {}
   local handCards = Player[sColor].getHandObjects()
-  dph("hand has " .. #handCards .. " card(s)")
   for _, card in ipairs(handCards) do
     local cardColor, rank, _ = cardDeets(card)
-    dph("  hand card rank=" .. tostring(rank) .. " color=" .. tostring(cardColor) .. " playable=" .. tostring(cardColor ~= "Wild" and rankTargets[rank] ~= nil))
     if isEligibleRank(rank) and cardColor ~= "Wild" and rankTargets[rank] then
-      if not byRank[rank] then
-        byRank[rank] = {}
-        table.insert(rankOrder, rank)
-      end
+      if not byRank[rank] then byRank[rank] = {}; table.insert(rankOrder, rank) end
       table.insert(byRank[rank], card)
     end
   end
 
+  local moves = {}
   local totalCards = 0
-  for _, rank in ipairs(rankOrder) do totalCards = totalCards + #byRank[rank] end
-  dph("toPlay count = " .. totalCards .. " across " .. #rankOrder .. " rank(s)")
-
-  if totalCards == 0 then
-    broadcastToColor("No playable cards found in hand", sColor)
-    return
+  for _, rank in ipairs(rankOrder) do
+    table.insert(moves, {rank=rank, cards=byRank[rank], target=rankTargets[rank]})
+    totalCards = totalCards + #byRank[rank]
   end
 
-  broadcastToColor("Auto-playing " .. totalCards .. " card(s)", sColor)
+  if totalCards == 0 then
+    return {ok=false, reason="No playable cards found in hand"}
+  end
+  return {ok=true, moves=moves, totalCards=totalCards}
+end
+
+--==============================================================================
+-- executeAutoPlay: animation layer for "Play Hand".
+function executeAutoPlay(sColor, plan)
+  local function dph(str)
+    if gtDebugFlags["playhand"] then printToColor("[playhand] " .. str, sColor) end
+  end
+
+  broadcastToColor("Auto-playing " .. plan.totalCards .. " card(s)", sColor)
 
   local t = 0
-  for _, rank in ipairs(rankOrder) do
-    local cards = byRank[rank]
-    local target = rankTargets[rank]
-    for _, card in ipairs(cards) do
+  for _, move in ipairs(plan.moves) do
+    for _, card in ipairs(move.cards) do
       local capturedCard = card
+      local capturedTarget = move.target
       Wait.time(function()
         local ok, desc = pcall(function() return capturedCard.getDescription() end)
         if ok then
-          dph("playing " .. desc .. " onto rank " .. rank)
-          capturedCard.setPosition(target.pos)
+          dph("playing " .. desc .. " onto rank " .. move.rank)
+          capturedCard.setPosition(capturedTarget.pos)
           playerStuff[sColor].bSpreadQueued = true
           queueSpread(sColor, capturedCard)
         else
-          dph("card for rank " .. rank .. " was invalid by the time its timer fired")
+          dph("card gone by timer time")
         end
       end, t)
       t = t + 1.5
     end
-    -- after all cards of this rank are placed, spread the full line
-    local capturedRank = rank
-    local capturedTarget = target
+    local capturedRank   = move.rank
+    local capturedTarget = move.target
     Wait.time(function()
       local allCards = getTableCardsOfRank(sColor, capturedRank)
-      dph("layout pretty for rank " .. capturedRank .. ": found " .. #allCards .. " object(s) on table")
       local safeCards = {}
       for _, obj in ipairs(allCards) do
         local ok = pcall(function() obj.getPosition() end)
         if ok then table.insert(safeCards, obj) end
       end
-      if #safeCards > 0 then
-        spread4(sColor, capturedTarget.pos, safeCards)
-      end
+      if #safeCards > 0 then spread4(sColor, capturedTarget.pos, safeCards) end
     end, t)
     t = t + 1.5
   end
 
-  Wait.time(function()
-    broadcastToColor("hand played", sColor)
-  end, t)
+  Wait.time(function() broadcastToColor("hand played", sColor) end, t)
+end
+
+function autoPlayMatchingCards(sColor, skipRedThrees)
+  if not skipRedThrees then
+    handleRedThrees(sColor, function() autoPlayMatchingCards(sColor, true) end)
+    return
+  end
+  local plan = planAutoPlay(sColor)
+  if not plan.ok then broadcastToColor(plan.reason, sColor); return end
+  executeAutoPlay(sColor, plan)
 end
 
 --==============================================================================
@@ -4179,37 +4192,20 @@ function computeNewLinePosition(sColor, colorZones, rotY, dph)
 end
 
 --==============================================================================
--- Lays out 3+ cards of a given rank from the player's hand onto the table.
--- Adds to an existing meld if one exists; otherwise creates a new line.
--- Requires 3+ cards of that rank and won't leave fewer than 2 cards in hand.
-function layoutHandRank(sColor, rank, skipRedThrees)
-  -- Handle red 3s first; re-enter with skipRedThrees=true once done.
-  if not skipRedThrees then
-    handleRedThrees(sColor, function() layoutHandRank(sColor, rank, true) end)
-    return
-  end
-
-  local function dph(str)
-    if gtDebugFlags["layouthand"] then
-      printToColor("[layouthand] " .. str, sColor)
-    end
-  end
-
-  dph("called for rank=" .. tostring(rank))
-
+--==============================================================================
+-- planLayoutRank: pure decision layer — no side effects, no animation.
+-- Returns {ok=bool, reason=string} on failure, or on success:
+--   {ok=true, cards=[], targetPos={x,y,z}, colorZones=..., rotY=...,
+--    rank=rank, sColor=sColor}
+function planLayoutRank(sColor, rank)
   local colorZones = getPlayerZones(sColor)
   if not colorZones then
-    broadcastToColor("No score zones found for " .. sColor, sColor)
-    return
+    return {ok=false, reason="No score zones found for " .. sColor}
   end
-
-  -- Reject wilds and 3s
   if not isEligibleRank(rank) then
-    broadcastToColor("Cannot layout wilds or 3s", sColor)
-    return
+    return {ok=false, reason="Cannot layout wilds or 3s"}
   end
 
-  -- Collect non-wild hand cards of this rank
   local handCards = Player[sColor].getHandObjects()
   local rankCards = {}
   for _, card in ipairs(handCards) do
@@ -4219,20 +4215,16 @@ function layoutHandRank(sColor, rank, skipRedThrees)
     end
   end
 
-  dph("hand=" .. #handCards .. " rank=" .. rank .. " count=" .. #rankCards)
-
   if #rankCards < 3 then
-    broadcastToColor("Need at least 3 of rank " .. rank .. " (have " .. #rankCards .. ")", sColor)
-    return
+    return {ok=false, reason="Need at least 3 of rank " .. rank .. " (have " .. #rankCards .. ")"}
   end
   if (#handCards - #rankCards) < 2 then
-    broadcastToColor("Cannot play: would leave fewer than 2 cards in hand", sColor)
-    return
+    return {ok=false, reason="Cannot play: would leave fewer than 2 cards in hand"}
   end
 
   local rotY = getPlayerRotY(sColor)
 
-  -- Determine drop target: only target incomplete melds, not complete books (Deck >= 7)
+  -- Find target: topmost card of an existing incomplete meld, or a new slot
   local allTableCards = getTableCardsOfRank(sColor, rank)
   local existingCards = {}
   for _, obj in ipairs(allTableCards) do
@@ -4243,10 +4235,9 @@ function layoutHandRank(sColor, rank, skipRedThrees)
     end
     if not isBook then table.insert(existingCards, obj) end
   end
-  local targetPos
 
+  local targetPos
   if #existingCards > 0 then
-    -- Find the topmost (nearest-center) existing card as the anchor
     local decode    = gt_DECODE_DIR[rotY]
     local depthAxis = (decode[1] == "x") and "z" or "x"
     local direction = decode[2]
@@ -4256,8 +4247,7 @@ function layoutHandRank(sColor, rank, skipRedThrees)
       if ok and epos then
         local score = epos[depthAxis] * direction
         if bestScore == nil or score > bestScore then
-          bestScore = score
-          targetPos = epos
+          bestScore = score; targetPos = epos
         end
       end
     end
@@ -4266,22 +4256,31 @@ function layoutHandRank(sColor, rank, skipRedThrees)
       if ok_fb and fb then targetPos = fb end
     end
     if not targetPos then
-      broadcastToColor("Could not read position of existing meld for rank " .. rank, sColor)
-      return
+      return {ok=false, reason="Could not read position of existing meld for rank " .. rank}
     end
-    dph("adding to existing line, anchor depth=" .. tostring(targetPos[depthAxis]))
   else
-    targetPos = computeNewLinePosition(sColor, colorZones, rotY, dph)
-    dph("new line at x=" .. tostring(targetPos.x) .. " z=" .. tostring(targetPos.z))
+    local dphNoop = function() end
+    targetPos = computeNewLinePosition(sColor, colorZones, rotY, dphNoop)
   end
 
-  broadcastToColor("Laying out " .. #rankCards .. " card(s) of rank " .. rank, sColor)
+  return {ok=true, cards=rankCards, targetPos=targetPos,
+          colorZones=colorZones, rotY=rotY, rank=rank, sColor=sColor}
+end
 
-  -- Move cards to target one at a time
+--==============================================================================
+-- executeLayoutRank: animation layer — runs the Wait.time chain and spread4.
+-- `plan` must be a successful result from planLayoutRank.
+function executeLayoutRank(sColor, plan)
+  local function dph(str)
+    if gtDebugFlags["layouthand"] then printToColor("[layouthand] " .. str, sColor) end
+  end
+
+  broadcastToColor("Laying out " .. #plan.cards .. " card(s) of rank " .. plan.rank, sColor)
+
   local t = 0
-  for _, card in ipairs(rankCards) do
+  for _, card in ipairs(plan.cards) do
     local capturedCard = card
-    local capturedPos  = targetPos
+    local capturedPos  = plan.targetPos
     Wait.time(function()
       local ok = pcall(function() capturedCard.setPosition(capturedPos) end)
       if not ok then dph("card gone before timer fired") end
@@ -4289,16 +4288,12 @@ function layoutHandRank(sColor, rank, skipRedThrees)
     t = t + 0.3
   end
 
-  -- After all placed, do a fresh zone scan to get current (non-stale) objects.
-  -- Explicitly exclude complete books (Deck >= 7) so they are never passed to spread4.
-  -- Using captured references is unsafe: cards landing on the meld cause TTS to merge
-  -- them into a new Deck object, invalidating the old individual card references.
-  local capturedRank = rank
-  local capturedPos  = targetPos
+  local capturedRank = plan.rank
+  local capturedPos  = plan.targetPos
   Wait.time(function()
     if playerStuff[sColor] then playerStuff[sColor].bSpreading = false end
     local freshScan = getTableCardsOfRank(sColor, capturedRank)
-    local allCards  = {}
+    local allCards = {}
     for _, obj in ipairs(freshScan) do
       pcall(function()
         local isBook = false
@@ -4309,20 +4304,32 @@ function layoutHandRank(sColor, rank, skipRedThrees)
         if not isBook then table.insert(allCards, obj) end
       end)
     end
-    -- Validate: drop stale object references so spread4's table.sort won't crash.
-    -- (Cards that landed on an existing meld get merged into a new Deck by TTS,
-    -- invalidating the old Card refs captured before the Wait.time.)
     local safeCards = {}
     for _, obj in ipairs(allCards) do
       local ok = pcall(function() obj.getPosition() end)
       if ok then table.insert(safeCards, obj) end
     end
     dph("spread4 for rank=" .. capturedRank .. " safeCards=" .. #safeCards)
-    if #safeCards > 0 then
-      spread4(sColor, capturedPos, safeCards)
-    end
+    if #safeCards > 0 then spread4(sColor, capturedPos, safeCards) end
     broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
   end, t + 1.0)
+end
+
+--==============================================================================
+-- Lays out 3+ cards of a given rank from the player's hand onto the table.
+-- Adds to an existing meld if one exists; otherwise creates a new line.
+-- Requires 3+ cards of that rank and won't leave fewer than 2 cards in hand.
+function layoutHandRank(sColor, rank, skipRedThrees)
+  if not skipRedThrees then
+    handleRedThrees(sColor, function() layoutHandRank(sColor, rank, true) end)
+    return
+  end
+  local plan = planLayoutRank(sColor, rank)
+  if not plan.ok then
+    broadcastToColor(plan.reason, sColor)
+    return
+  end
+  executeLayoutRank(sColor, plan)
 end
 
 --==============================================================================
@@ -4345,40 +4352,39 @@ function layoutHandAll(sColor, skipRedThrees)
 
   broadcastToColor("Laying out " .. #eligible .. " rank(s) from hand", sColor)
 
-  -- Schedule each rank: stagger by (count * 0.3 + 1.0 spread time + 0.5 buffer)
+  -- Schedule each rank with a stagger.
+  -- planLayoutRank gives us the card count for a tight delay estimate;
+  -- fall back to a conservative 7-card estimate if the plan fails.
   local t = 0
   for _, rank in ipairs(eligible) do
     local capturedRank = rank
     Wait.time(function()
       layoutHandRank(sColor, capturedRank, true)  -- red 3s already handled above
     end, t)
-    t = t + (byRank[rank] * 0.3) + 1.5
+    local plan = planLayoutRank(sColor, rank)
+    local nCards = (plan.ok and plan.cards) and #plan.cards or 7
+    t = t + (nCards * 0.3) + 1.5
   end
 end
 
 --==============================================================================
--- Scans zone 1 for complete books (face-up Deck with qty >= 7) and moves each
--- to the next available slot in the side zones (2 and/or 3).
--- The zone to the player's right fills left-to-right (inner edge outward).
--- The zone to the player's left fills right-to-left (inner edge outward).
-function checkAndMoveBooks(sColor)
+-- planMoveBooks: pure decision layer for checkAndMoveBooks.
+-- Scans zone 1 for complete books and computes target positions in side zones.
+-- Returns {ok=false} if nothing to move, or
+--   {ok=true, moves=[{book=obj, tPos={x,y,z}}]}
+function planMoveBooks(sColor)
   local colorZones = getPlayerZones(sColor)
-  if not colorZones then return end
-  if not colorZones.zones[1] or not colorZones.zones[1].obj then return end
-  if not colorZones.zones[2] or not colorZones.zones[2].obj then return end
+  if not colorZones then return {ok=false} end
+  if not colorZones.zones[1] or not colorZones.zones[1].obj then return {ok=false} end
+  if not colorZones.zones[2] or not colorZones.zones[2].obj then return {ok=false} end
 
   local decode = getPlayerDecodeDir(sColor)
-  if not decode then return end
+  if not decode then return {ok=false} end
   local lateralAxis = decode[1]
   local direction   = decode[2]
   local depthAxis   = (lateralAxis == "x") and "z" or "x"
+  local bookGap     = gv_CARD_SIZE.x + 0.5
 
-  -- Books are stacked rotated 90°; lateral footprint = card depth dimension.
-  -- Books are rotated 90° but the long dimension (x=3) stays lateral after that
-  -- rotation in TTS, so use gv_CARD_SIZE.x as the lateral footprint.
-  local bookGap = gv_CARD_SIZE.x + 0.5   -- 3.5 units center-to-center
-
-  -- Gather geometry (position + scale) for a side zone.
   local function getZoneGeo(zi)
     local z = colorZones.zones[zi]
     if not z or not z.obj then return nil end
@@ -4391,7 +4397,6 @@ function checkAndMoveBooks(sColor)
 
   local geo = {[2]=getZoneGeo(2), [3]=getZoneGeo(3)}
 
-  -- Determine which side zone is "right" (further in the direction sense) and "left".
   local rightIdx, leftIdx
   if geo[2] and geo[3] then
     if geo[2].pos[lateralAxis] * direction >= geo[3].pos[lateralAxis] * direction then
@@ -4405,8 +4410,6 @@ function checkAndMoveBooks(sColor)
     if geo[3].pos[lateralAxis] * direction >= 0 then rightIdx = 3 else leftIdx = 3 end
   end
 
-  -- Collect the lateral positions of ALL existing objects in a side zone.
-  -- Used to detect collisions (e.g. face-down shuffle deck sitting in the zone).
   local function getOccupied(zi)
     local occ = {}
     if not zi or not geo[zi] then return occ end
@@ -4419,7 +4422,6 @@ function checkAndMoveBooks(sColor)
     return occ
   end
 
-  -- Returns true if `lat` is within bookGap of any entry in `occupied`.
   local function isBlocked(lat, occupied)
     for _, occ in ipairs(occupied) do
       if math.abs(lat - occ) < bookGap * 0.9 then return true end
@@ -4427,9 +4429,6 @@ function checkAndMoveBooks(sColor)
     return false
   end
 
-  -- Lateral coordinate of the n-th slot in a zone.
-  -- rightFill=true  → fills in `direction` (left→right for player)
-  -- rightFill=false → fills in `-direction` (right→left for player)
   local function slotLat(zi, n, rightFill)
     local g = geo[zi]; if not g then return nil end
     local innerEdge = rightFill
@@ -4439,7 +4438,6 @@ function checkAndMoveBooks(sColor)
     return innerEdge + fillDir * (n - 0.5) * bookGap
   end
 
-  -- Returns true if `lat` is within the zone's outer boundary.
   local function slotInBounds(zi, lat, rightFill)
     local g = geo[zi]; if not g then return false end
     local outerEdge = rightFill
@@ -4449,67 +4447,90 @@ function checkAndMoveBooks(sColor)
     return (lat - outerEdge) * fillDir <= 0
   end
 
-  -- Scan slots from n=1 upward, skipping any that are out-of-bounds or blocked
-  -- by an existing object.  Reserves the chosen slot by appending to `occupied`.
   local function findSlot(zi, rightFill, occupied)
     if not zi then return nil end
     for n = 1, 50 do
       local lat = slotLat(zi, n, rightFill)
       if not lat or not slotInBounds(zi, lat, rightFill) then return nil end
       if not isBlocked(lat, occupied) then
-        table.insert(occupied, lat)   -- reserve for subsequent books
+        table.insert(occupied, lat)
         return lat
       end
     end
     return nil
   end
 
-  -- Seed occupied lists with every existing object already in each side zone.
   local occRight = getOccupied(rightIdx)
   local occLeft  = getOccupied(leftIdx)
 
-  -- Depth (forward/back) and y positions for placement in the side zones.
-  local refGeo = geo[rightIdx] or geo[leftIdx]
-  if not refGeo then return end
-  local targetDepth = refGeo.pos[depthAxis]
-  local targetY     = refGeo.pos.y - refGeo.scl.y / 2 + gv_CARD_SIZE.y
+  -- Blue fills left zone first, then overflows to right.
+  -- All other players fill right zone first, then overflow to left.
+  local firstIdx,  firstFill,  firstOcc  = rightIdx, true,  occRight
+  local secondIdx, secondFill, secondOcc = leftIdx,  false, occLeft
+  if sColor == "Blue" then
+    firstIdx,  firstFill,  firstOcc  = leftIdx,  false, occLeft
+    secondIdx, secondFill, secondOcc = rightIdx, true,  occRight
+  end
 
-  -- Scan zone 1 for complete books to relocate.
-  local zone1Books = {}
+  local refGeo = geo[rightIdx] or geo[leftIdx]
+  if not refGeo then return {ok=false} end
+  local targetY = refGeo.pos.y - refGeo.scl.y / 2 + gv_CARD_SIZE.y
+
+  local moves = {}
   local ok1, z1objs = pcall(function() return colorZones.zones[1].obj.getObjects() end)
-  if not ok1 or not z1objs then return end
+  if not ok1 or not z1objs then return {ok=false} end
   for _, obj in ipairs(z1objs) do
     pcall(function()
       if not obj.is_face_down and obj.tag == "Deck" then
         local ok_q, qty = pcall(function() return obj.getQuantity() end)
         if ok_q and qty and qty >= 7 then
-          table.insert(zone1Books, obj)
+          local targetLat, slotZoneIdx
+          targetLat = findSlot(firstIdx, firstFill, firstOcc)
+          if targetLat then
+            slotZoneIdx = firstIdx
+          else
+            targetLat = findSlot(secondIdx, secondFill, secondOcc)
+            if targetLat then slotZoneIdx = secondIdx end
+          end
+          if targetLat then
+            local zGeo = geo[slotZoneIdx]
+            local tPos = {x=0, y=targetY, z=0}
+            tPos[lateralAxis] = targetLat
+            tPos[depthAxis]   = zGeo.pos[depthAxis]  -- center of the destination zone
+            table.insert(moves, {book=obj, tPos=tPos})
+          end
         end
       end
     end)
   end
 
-  if #zone1Books == 0 then return end
+  if #moves == 0 then return {ok=false} end
+  return {ok=true, moves=moves}
+end
 
-  -- Move each zone-1 book to the next available side-zone slot,
-  -- skipping any position that would overlap an existing object.
+--==============================================================================
+-- executeMoveBooks: animation layer for checkAndMoveBooks.
+function executeMoveBooks(plan)
   local delay = 0
-  for _, book in ipairs(zone1Books) do
-    -- Prefer right zone (left-to-right fill); fall back to left zone.
-    local targetLat = findSlot(rightIdx, true,  occRight)
-                   or findSlot(leftIdx,  false, occLeft)
-
-    if targetLat then
-      local captured = book
-      local tPos = {x=0, y=targetY, z=0}
-      tPos[lateralAxis] = targetLat
-      tPos[depthAxis]   = targetDepth
-      Wait.time(function()
-        pcall(function() captured.setPositionSmooth(tPos, false, false) end)
-      end, delay)
-      delay = delay + 0.4
-    end
+  for _, move in ipairs(plan.moves) do
+    local captured = move.book
+    local tPos     = move.tPos
+    Wait.time(function()
+      pcall(function() captured.setPositionSmooth(tPos, false, false) end)
+    end, delay)
+    delay = delay + 0.4
   end
+end
+
+--==============================================================================
+-- Scans zone 1 for complete books (face-up Deck with qty >= 7) and moves each
+-- to the next available slot in the side zones (2 and/or 3).
+-- The zone to the player's right fills left-to-right (inner edge outward).
+-- The zone to the player's left fills right-to-left (inner edge outward).
+function checkAndMoveBooks(sColor)
+  local plan = planMoveBooks(sColor)
+  if not plan.ok then return end
+  executeMoveBooks(plan)
 end
 
 --==============================================================================
