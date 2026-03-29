@@ -328,6 +328,7 @@ function refreshScoresheet()
   end
 
   setPlayerNamesOnScoresheet()
+  setActionPanelVisibility()
 
 end
 
@@ -370,6 +371,7 @@ function onPlayerChangeColor( player_color)
   if (player_color != 'Grey') then
     setPlayers()
     setPlayerNamesOnScoresheet()
+    setActionPanelVisibility()
   end
 end
 
@@ -394,6 +396,105 @@ end
 -- =============================================================================
 function click_DoNothing(_, color)
 -- a null function as one is required for buttons but not always needed
+end
+
+-- =============================================================================
+function setActionPanelVisibility()
+  -- Action panel is only for White.
+  -- Use active=true/false (not just visibility) because TTS doesn't reliably
+  -- re-evaluate visibility= when a player changes seats.
+  -- active=false hides from everyone; active=true + visibility="White" shows only to White.
+  Wait.time(function()
+    local whiteSeated = false
+    for _, p in ipairs(Player.getPlayers()) do
+      if p.color == "White" then whiteSeated = true; break end
+    end
+    if whiteSeated then
+      UI.setAttribute("ActionPanel", "visibility", "White")
+      UI.setAttribute("ActionPanel", "active", "true")
+    else
+      UI.setAttribute("ActionPanel", "active", "false")
+    end
+  end, 0.3)
+end
+
+-- =============================================================================
+-- Action Panel handlers
+-- The panel is declared in Global.-1.xml (id="ActionPanel").
+-- onClick receives a player object; extract .color for game functions.
+
+function click_ToggleActionPanel(player)
+  local current = UI.getAttribute("ActionSubPanel", "active")
+  UI.setAttribute("ActionSubPanel", "active", current == "true" and "false" or "true")
+end
+
+function click_ActionPlayHand(player)
+  autoPlayMatchingCards(player.color)
+end
+
+-- "Play and Lay": layout all eligible ranks, then play any newly-matched hand
+-- cards onto the table.  Red 3s are handled once up front; both sub-operations
+-- receive skipRedThrees=true so they don't repeat the check.
+function click_ActionPlayAndLay(player)
+  local sColor = player.color
+  handleRedThrees(sColor, function()
+    -- Compute how long layoutHandAll will take (using current hand state).
+    local eligible = getEligibleRanks(sColor)
+    local layoutTime = 0
+    for _, rank in ipairs(eligible) do
+      local plan = planLayoutRank(sColor, rank)
+      local nCards = (plan.ok and plan.cards) and #plan.cards or 7
+      layoutTime = layoutTime + (nCards * 0.15) + 0.75
+    end
+    layoutHandAll(sColor, true)
+    -- After layout finishes (plus a small buffer), play matching hand cards.
+    Wait.time(function()
+      autoPlayMatchingCards(sColor, true)
+    end, layoutTime + 1.0)
+  end)
+end
+
+function click_ActionLayoutAllHand(player)
+  layoutHandAll(player.color)
+end
+
+-- "Draw, Sort, Play Lay": draw 2, sort, play hand, then layout all.
+-- Sequence: deal → wait for cards to arrive → red 3s → sort →
+--           play hand onto existing melds → layout remaining eligible ranks.
+function click_ActionDrawSortPlayLay(player)
+  local sColor = player.color
+
+  -- Draw 2 cards from the main deck.
+  if mainDeck then
+    pcall(function() mainDeck.deal(1, sColor) end)
+    Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, 0.5)
+  end
+
+  -- Wait for cards to arrive in hand, then handle red 3s and continue.
+  Wait.time(function()
+    handleRedThrees(sColor, function()
+      -- Sort is synchronous — runs immediately after red 3s are cleared.
+      pcall(function() sortHand(nil, sColor) end)
+
+      -- Brief pause for sort to visually complete, then play hand.
+      Wait.time(function()
+        local playPlan = planAutoPlay(sColor)
+        local playDuration = 0
+        if playPlan.ok then
+          executeAutoPlay(sColor, playPlan)
+          for _, move in ipairs(playPlan.moves) do
+            playDuration = playDuration + (#move.cards * 0.75) + 0.75
+          end
+        end
+
+        -- Layout all eligible ranks after play finishes.
+        Wait.time(function()
+          layoutHandAll(sColor, true)
+        end, playDuration + 0.5)
+
+      end, 0.5)
+    end)
+  end, 2.5)
 end
 
 
@@ -1242,7 +1343,6 @@ function onLoad(saved_data)
   obj_Zone["White"] = obj_Zone_White
   for sColor, zone in pairs(obj_Zone) do
     local c = sColor
-    zone.addContextMenuItem("Play Hand",        function() autoPlayMatchingCards(c) end, false)
     zone.addContextMenuItem("Layout All Hand",  function() layoutHandAll(c)         end, false)
   end
 
@@ -4024,7 +4124,7 @@ function executeAutoPlay(sColor, plan)
           dph("card gone by timer time")
         end
       end, t)
-      t = t + 1.5
+      t = t + 0.75
     end
     local capturedRank   = move.rank
     local capturedTarget = move.target
@@ -4037,7 +4137,7 @@ function executeAutoPlay(sColor, plan)
       end
       if #safeCards > 0 then spread4(sColor, capturedTarget.pos, safeCards) end
     end, t)
-    t = t + 1.5
+    t = t + 0.75
   end
 
   Wait.time(function() broadcastToColor("hand played", sColor) end, t)
@@ -4285,7 +4385,7 @@ function executeLayoutRank(sColor, plan)
       local ok = pcall(function() capturedCard.setPosition(capturedPos) end)
       if not ok then dph("card gone before timer fired") end
     end, t)
-    t = t + 0.3
+    t = t + 0.15
   end
 
   local capturedRank = plan.rank
@@ -4293,26 +4393,18 @@ function executeLayoutRank(sColor, plan)
   Wait.time(function()
     if playerStuff[sColor] then playerStuff[sColor].bSpreading = false end
     local freshScan = getTableCardsOfRank(sColor, capturedRank)
-    local allCards = {}
-    for _, obj in ipairs(freshScan) do
-      pcall(function()
-        local isBook = false
-        if obj.tag == "Deck" then
-          local ok, qty = pcall(function() return obj.getQuantity() end)
-          if ok and qty and qty >= 7 then isBook = true end
-        end
-        if not isBook then table.insert(allCards, obj) end
-      end)
-    end
+    -- Do NOT filter out complete books (Deck qty>=7) here.
+    -- spread4 needs to see the full Deck so it can count 7+ cards,
+    -- apply the 90-degree rotation, and fire checkAndMoveBooks.
     local safeCards = {}
-    for _, obj in ipairs(allCards) do
+    for _, obj in ipairs(freshScan) do
       local ok = pcall(function() obj.getPosition() end)
       if ok then table.insert(safeCards, obj) end
     end
     dph("spread4 for rank=" .. capturedRank .. " safeCards=" .. #safeCards)
     if #safeCards > 0 then spread4(sColor, capturedPos, safeCards) end
     broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
-  end, t + 1.0)
+  end, t + 0.5)
 end
 
 --==============================================================================
@@ -4363,7 +4455,7 @@ function layoutHandAll(sColor, skipRedThrees)
     end, t)
     local plan = planLayoutRank(sColor, rank)
     local nCards = (plan.ok and plan.cards) and #plan.cards or 7
-    t = t + (nCards * 0.3) + 1.5
+    t = t + (nCards * 0.15) + 0.75
   end
 end
 
@@ -4811,15 +4903,9 @@ function onObjectSpawn(obj)
     -- Card-only items: do NOT add these to all objects — hand zone scripting zones
     -- break if they receive more than 3 items total (2 from here + 1 from onLoad).
     if obj.tag == "Card" then
-      obj.addContextMenuItem('Play Hand', function(playerColor)
-        autoPlayMatchingCards(playerColor)
-      end, false)
       obj.addContextMenuItem('Layout Hand', function(playerColor)
         local _, rank, _ = cardDeets(obj)
         layoutHandRank(playerColor, rank)
-      end, false)
-      obj.addContextMenuItem('Layout All Hand', function(playerColor)
-        layoutHandAll(playerColor)
       end, false)
     end
 end

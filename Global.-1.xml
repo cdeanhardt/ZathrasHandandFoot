@@ -125,3 +125,50 @@
       <Image id="GoesFirst" active="false" image="GoesFirstOrangeBorder" height="25" width="25" rectAlignment="UpperLeft" offsetXY="-5 0" />
     </Panel>
 </Panel>
+
+<!-- ============================================================ -->
+<!-- Action Panel — floating window for hand action buttons.      -->
+<!-- Visible to White only; expand visibility list as needed.     -->
+<!-- ============================================================ -->
+<Panel id="ActionPanel"
+       width="190" height="30"
+       rectAlignment="LowerLeft" offsetXY="10 180"
+       showAnimation="Grow" hideAnimation="Shrink"
+       returnToOriginalPositionWhenReleased="false" allowDragging="true"
+       color="#bbbbbb00"
+       visibility="White">
+    <Row id="ActionMenuBar" class="MenuBar" width="190">
+        <Text id="ActionWindowTitle" text="Hand Actions" class="UIText"
+              rectAlignment="UpperCenter" alignment="LowerCenter"
+              width="140" height="80" offsetXY="0 55" />
+        <Button id="ActionCloseButton" class="topButtons"
+                rectAlignment="UpperRight" color="#990000"
+                textColor="#FFFFFF" text="^"
+                onClick="click_ToggleActionPanel" />
+    </Row>
+    <Panel id="ActionSubPanel" class="SubPanel"
+           width="190" height="155"
+           rectAlignment="UpperLeft" offsetXY="0 -30"
+           color="#bbbbbb">
+        <Button id="btnPlayHand"
+                text="Play Hand" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -8"
+                color="#2255aa" textColor="#FFFFFF" fontSize="14"
+                onClick="click_ActionPlayHand" />
+        <Button id="btnLayoutAllHand"
+                text="Layout All Hand" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -43"
+                color="#2255aa" textColor="#FFFFFF" fontSize="14"
+                onClick="click_ActionLayoutAllHand" />
+        <Button id="btnPlayAndLay"
+                text="Play and Lay" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -78"
+                color="#226622" textColor="#FFFFFF" fontSize="14"
+                onClick="click_ActionPlayAndLay" />
+        <Button id="btnDrawSortPlayLay"
+                text="Draw, Sort, Play Lay" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -113"
+                color="#664422" textColor="#FFFFFF" fontSize="14"
+                onClick="click_ActionDrawSortPlayLay" />
+    </Panel>
+</Panel>
