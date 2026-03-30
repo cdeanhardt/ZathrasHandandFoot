@@ -145,50 +145,64 @@ end
 -- Returns [{rank, cards, count, existingCount, priority, reason}] sorted by priority.
 --
 -- Priority tiers:
---   1 — play completes an existing meld to a book (≥7 total)
---   2 — play extends an existing meld
---   3 — play starts a new meld (no existing meld of this rank on table)
+--   1 — play completes an existing meld/book to a book (≥7 total)
+--   2 — play extends an existing meld or book (any count, including singletons/pairs)
+--   3 — play starts a new meld (no existing meld of this rank on table, count ≥ 3)
 function evalMeldsToPlay(state)
+  -- Build a rank→{obj,count,isBook} lookup covering both open melds and books.
+  -- (state.meldsByRank only holds non-book melds; books are indexed by type.)
+  -- TTS getQuantity() returns -1 for a single Card object (not a Deck).
+  -- Clamp to 1 minimum so existingCount is never negative.
+  local function safeQty(obj, fallback)
+    local ok, qty = pcall(function() return obj.getQuantity() end)
+    if ok and qty and qty >= 1 then return qty end
+    return fallback
+  end
+
+  local existingByRank = {}
+  for rank, meld in pairs(state.meldsByRank) do
+    existingByRank[rank] = {obj=meld.obj, count=safeQty(meld.obj, 1), isBook=false}
+  end
+  for _, bookList in pairs(state.books) do
+    for _, book in ipairs(bookList) do
+      if book.rank and not existingByRank[book.rank] then
+        existingByRank[book.rank] = {obj=book.obj, count=safeQty(book.obj, 7), isBook=true}
+      end
+    end
+  end
+
   local plans = {}
-
   for rank, count in pairs(state.handByRank) do
-    if count >= 3 and isEligibleRank(rank) then
-      -- How many cards are already on the table for this rank?
-      local existingMeld  = state.meldsByRank[rank]
-      local existingCount = 0
-      if existingMeld then
-        local ok, qty = pcall(function() return existingMeld.obj.getQuantity() end)
-        existingCount = (ok and qty) or 1  -- Card tag = 1
+    if isEligibleRank(rank) then
+      local existing      = existingByRank[rank]
+      local existingCount = existing and existing.count or 0
+
+      -- Include if we can start a new meld (count>=3) OR extend an existing one (any count).
+      if count >= 3 or existing then
+        local projected = existingCount + count
+        local priority, reason
+        if existing and existingCount < 7 and projected >= 7 then
+          priority = 1
+          reason = string.format("completes book: %d + %d = %d", existingCount, count, projected)
+        elseif existing then
+          priority = 2
+          reason = string.format("extends %s: %d on table + %d from hand",
+            existing.isBook and "book" or "meld", existingCount, count)
+        else
+          priority = 3
+          reason = string.format("new meld: %d cards of rank %s", count, rank)
+        end
+
+        -- Gather actual card objects for this rank
+        local cards = {}
+        for _, card in ipairs(state.hand) do
+          if card.rank == rank then table.insert(cards, card) end
+        end
+        table.insert(plans, {
+          rank=rank, cards=cards, count=count,
+          existingCount=existingCount, priority=priority, reason=reason,
+        })
       end
-
-      local projected = existingCount + count
-      local priority, reason
-
-      if existingMeld and existingCount < 7 and projected >= 7 then
-        priority = 1
-        reason = string.format("completes book: %d + %d = %d", existingCount, count, projected)
-      elseif existingMeld then
-        priority = 2
-        reason = string.format("extends meld: %d on table + %d from hand", existingCount, count)
-      else
-        priority = 3
-        reason = string.format("new meld: %d cards of rank %s", count, rank)
-      end
-
-      -- Gather actual card objects for this rank
-      local cards = {}
-      for _, card in ipairs(state.hand) do
-        if card.rank == rank then table.insert(cards, card) end
-      end
-
-      table.insert(plans, {
-        rank          = rank,
-        cards         = cards,
-        count         = count,
-        existingCount = existingCount,
-        priority      = priority,
-        reason        = reason,
-      })
     end
   end
 
@@ -201,81 +215,155 @@ function evalMeldsToPlay(state)
   return plans
 end
 
--- Discard tier for a non-wild card.  Lower tier = discard sooner.
--- Tiers: 0=black 3s, 1=low(4-7), 2=mid(8-K), 3=ace, 99=red 3s (skip)
-local gt_DISCARD_TIER = {
-  ["4"]=1, ["5"]=1, ["6"]=1, ["7"]=1,
-  ["8"]=2, ["9"]=2, ["10"]=2, ["J"]=2, ["Q"]=2, ["K"]=2,
+-- Strata for eligible ranks (4-7=1, 8-K=2, A=3).
+-- Lower strata = discard sooner.
+local gt_DISCARD_STRATA = {
+  ["4"]=1,["5"]=1,["6"]=1,["7"]=1,
+  ["8"]=2,["9"]=2,["10"]=2,["J"]=2,["Q"]=2,["K"]=2,
   ["A"]=3,
 }
-local function discardTier(card)
-  if card.rank == "3" then
-    return card.color == "Black" and 0 or 99
-  end
-  return gt_DISCARD_TIER[card.rank] or 2
-end
+-- Rank ordering within a strata for tiebreaker (higher = discard first).
+local gt_RANK_WITHIN_STRATA = {
+  ["4"]=1,["5"]=2,["6"]=3,["7"]=4,
+  ["8"]=1,["9"]=2,["10"]=3,["J"]=4,["Q"]=5,["K"]=6,
+  ["A"]=1,
+}
 
 -- What card to discard after planned melds? Returns {card=entry_or_nil, reason=string}
 --
--- Rules (in priority order):
---   FILTER — never discard a wild while any non-wild remains
---   FILTER — never discard a red 3 (handled by the red-3 mechanic)
---   TIER   — black 3s first, then ranks 4-7, then 8-K, then Aces
---   COUNT  — within a tier, fewest copies remaining first (1-of before 2-of, etc.)
---   WILDS  — only if no non-wilds remain: 2s before Jokers
+-- Priority pipeline:
+--  1. Black 3s — always first.
+--  2. Non-wild, non-3 candidates only (red 3s never discarded; wilds held for last).
+--  3. Minimum count: singletons before pairs before triples, etc.
+--  4. Lowest strata within min-count: strata 1 (4-7) → 2 (8-K) → 3 (A).
+--  5. Prefer same-color sets (all-Red or all-Black) within chosen strata/count.
+--  6. Within chosen set, prefer the card whose removal leaves ≥1 of each color.
+--  7. Tiebreaker: highest rank within the strata (K before 8, 7 before 4, etc.).
+--  8. Wild fallback (no non-wilds left): 2s before Jokers.
+--  9. Absolute fallback: first remaining card.
 function evalDiscard(state, meldPlan)
   local melding = {}
   for _, m in ipairs(meldPlan) do melding[m.rank] = true end
 
-  local remaining    = {}
-  local remainByRank = {}
+  local remaining = {}
   for _, card in ipairs(state.hand) do
-    if not melding[card.rank] then
-      table.insert(remaining, card)
-      if card.color ~= "Wild" and card.rank ~= "3" then
-        remainByRank[card.rank] = (remainByRank[card.rank] or 0) + 1
-      end
-    end
+    if not melding[card.rank] then table.insert(remaining, card) end
   end
 
   if #remaining == 0 then
     return {card=nil, reason="hand emptied by melds (go out)"}
   end
 
-  local hasNonWild = false
+  -- RULE 1: Black 3 always first.
   for _, card in ipairs(remaining) do
-    if card.color ~= "Wild" then hasNonWild = true; break end
+    if card.rank == "3" and card.color == "Black" then
+      return {card=card, reason="black 3 — always discard first"}
+    end
   end
 
-  local best, bestScore, bestReason = nil, math.huge, "no suitable discard found"
+  -- Partition into eligible candidates (non-wild, non-3) and wilds.
+  local candidates, wilds = {}, {}
   for _, card in ipairs(remaining) do
-    local tier, count, skip = 0, 0, false
     if card.color == "Wild" then
-      if hasNonWild then skip = true
-      elseif card.rank == "Joker" then tier = 11
-      else tier = 10 end
-      count = 0
-    else
-      tier = discardTier(card)
-      if tier == 99 then skip = true end
-      count = remainByRank[card.rank] or 1
-    end
-    if not skip then
-      local score = tier * 1000 + count
-      if score < bestScore then
-        bestScore  = score
-        best       = card
-        if card.color == "Wild" then
-          bestReason = string.format("wild %s (no non-wilds remain, tier %d)", card.rank, tier)
-        else
-          bestReason = string.format("%s: tier %d, %d of rank remaining", card.rank, tier, count)
-        end
-      end
+      table.insert(wilds, card)
+    elseif card.rank ~= "3" then
+      table.insert(candidates, card)
     end
   end
 
-  if best then return {card=best, reason=bestReason} end
-  return {card=remaining[1], reason="fallback: only unplayable cards remain"}
+  -- RULE 8: Wild fallback only when no candidates remain.
+  if #candidates == 0 then
+    table.sort(wilds, function(a, b)
+      return (a.rank == "Joker" and 1 or 0) < (b.rank == "Joker" and 1 or 0)
+    end)
+    if #wilds > 0 then
+      return {card=wilds[1], reason=string.format("wild %s (no non-wilds remain — 2s before Jokers)", wilds[1].rank)}
+    end
+    return {card=remaining[1], reason="absolute fallback"}
+  end
+
+  -- Group candidates by rank.
+  local byRank = {}
+  for _, card in ipairs(candidates) do
+    if not byRank[card.rank] then byRank[card.rank] = {rank=card.rank, cards={}} end
+    table.insert(byRank[card.rank].cards, card)
+  end
+  local groups = {}
+  for _, g in pairs(byRank) do table.insert(groups, g) end
+
+  -- RULE 3: Minimum count.
+  local minCount = math.huge
+  for _, g in ipairs(groups) do
+    if #g.cards < minCount then minCount = #g.cards end
+  end
+  local atMinCount = {}
+  for _, g in ipairs(groups) do
+    if #g.cards == minCount then table.insert(atMinCount, g) end
+  end
+
+  -- RULE 4: Lowest strata within min-count.
+  local minStrata = math.huge
+  for _, g in ipairs(atMinCount) do
+    local s = gt_DISCARD_STRATA[g.rank] or 2
+    if s < minStrata then minStrata = s end
+  end
+  local atMinStrata = {}
+  for _, g in ipairs(atMinCount) do
+    if (gt_DISCARD_STRATA[g.rank] or 2) == minStrata then
+      table.insert(atMinStrata, g)
+    end
+  end
+
+  -- RULE 5: Prefer mono-color groups.
+  local function isMono(g)
+    local c = nil
+    for _, card in ipairs(g.cards) do
+      if c == nil then c = card.color
+      elseif card.color ~= c then return false end
+    end
+    return true
+  end
+  local mono = {}
+  for _, g in ipairs(atMinStrata) do
+    if isMono(g) then table.insert(mono, g) end
+  end
+  local pool = (#mono > 0) and mono or atMinStrata
+
+  -- RULE 7: Tiebreaker — highest rank within strata.
+  table.sort(pool, function(a, b)
+    return (gt_RANK_WITHIN_STRATA[a.rank] or 0) > (gt_RANK_WITHIN_STRATA[b.rank] or 0)
+  end)
+  local chosen = pool[1]
+
+  -- RULE 6: Within chosen group, pick card that leaves ≥1 of each color.
+  local function colorCounts(cards)
+    local cc = {}
+    for _, c in ipairs(cards) do cc[c.color] = (cc[c.color] or 0) + 1 end
+    return cc
+  end
+  local function removingKeepsBalance(card, groupCards)
+    local cc = colorCounts(groupCards)
+    cc[card.color] = cc[card.color] - 1
+    for _, cnt in pairs(cc) do if cnt < 1 then return false end end
+    return true
+  end
+
+  local pick = nil
+  if #chosen.cards == 1 then
+    pick = chosen.cards[1]
+  else
+    for _, card in ipairs(chosen.cards) do
+      if removingKeepsBalance(card, chosen.cards) then pick = card; break end
+    end
+    if not pick then pick = chosen.cards[1] end
+  end
+
+  local reason = string.format(
+    "%s — count=%d strata=%d rank-slot=%d%s",
+    chosen.rank, minCount, minStrata,
+    gt_RANK_WITHIN_STRATA[chosen.rank] or 0,
+    isMono(chosen) and " [mono-color]" or "")
+  return {card=pick, reason=reason}
 end
 
 -- ----------------------------------------------------------------------------

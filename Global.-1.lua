@@ -403,19 +403,25 @@ function setActionPanelVisibility()
   -- Action panel is only for White.
   -- Use active=true/false (not just visibility) because TTS doesn't reliably
   -- re-evaluate visibility= when a player changes seats.
-  -- active=false hides from everyone; active=true + visibility="White" shows only to White.
+  -- Use Player["White"].seated (canonical TTS property) rather than iterating
+  -- Player.getPlayers(), which can lag behind the actual seat state.
   Wait.time(function()
-    local whiteSeated = false
-    for _, p in ipairs(Player.getPlayers()) do
-      if p.color == "White" then whiteSeated = true; break end
-    end
-    if whiteSeated then
+    local ok, whiteSeated = pcall(function() return Player["White"].seated end)
+    if ok and whiteSeated then
       UI.setAttribute("ActionPanel", "visibility", "White")
       UI.setAttribute("ActionPanel", "active", "true")
     else
       UI.setAttribute("ActionPanel", "active", "false")
     end
   end, 0.3)
+end
+
+-- onPlayerTurnStart fires when the turn system advances to a new player.
+-- Use it as a second trigger for panel visibility so that returning to the
+-- White seat after another player's turn reliably restores the panel even
+-- if onPlayerChangeColor fires in an unexpected order in hotswap mode.
+function onPlayerTurnStart(player_color, prev_player_color)
+  setActionPanelVisibility()
 end
 
 -- =============================================================================
@@ -500,12 +506,44 @@ end
 -- Draw 2 cards from the main deck then handle any red 3s that arrive.
 function click_ActionDraw(player)
   local sColor = player.color
-  if mainDeck then
-    pcall(function() mainDeck.deal(1, sColor) end)
-    Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, 0.5)
-  end
+  if not mainDeck then return end
+
+  -- Snapshot GUIDs already in hand before dealing.
+  local preDraw = {}
+  pcall(function()
+    for _, obj in ipairs(Player[sColor].getHandObjects()) do
+      preDraw[obj.guid] = true
+    end
+  end)
+
+  pcall(function() mainDeck.deal(1, sColor) end)
+  Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, 0.5)
+
+  -- After both cards have landed: report drawn cards to player, then sort.
   Wait.time(function()
-    handleRedThrees(sColor, function() end)
+    pcall(function()
+      local drawn = {}
+      for _, obj in ipairs(Player[sColor].getHandObjects()) do
+        if not preDraw[obj.guid] then
+          local ok, cl, rk, su = pcall(function()
+            local c, r, s = cardDeets(obj)
+            return c, r, s
+          end)
+          if ok then
+            table.insert(drawn, rk .. " of " .. (su or "?"))
+          end
+        end
+      end
+      if #drawn > 0 then
+        printToColor("Drew: " .. table.concat(drawn, ", "), sColor)
+      end
+    end)
+  end, 1.5)
+
+  Wait.time(function()
+    handleRedThrees(sColor, function()
+      Wait.time(function() sortHand(nil, sColor) end, 0.5)
+    end)
   end, 2.5)
 end
 
@@ -3983,37 +4021,62 @@ end
 -- Priority: 1=completes book, 2=extends meld, 3=new meld.
 -- Returns [{rank, cards, count, existingCount, priority, reason}]
 function evalMeldsToPlay(state)
-  local plans = {}
-  for rank, count in pairs(state.handByRank) do
-    if count >= 3 and isEligibleRank(rank) then
-      local existingMeld  = state.meldsByRank[rank]
-      local existingCount = 0
-      if existingMeld then
-        local ok, qty = pcall(function() return existingMeld.obj.getQuantity() end)
-        existingCount = (ok and qty) or 1
+  -- Build a rank→{obj,count,isBook} lookup covering both open melds and books.
+  -- (state.meldsByRank only holds non-book melds; books are indexed by type.)
+  -- TTS getQuantity() returns -1 for a single Card object (not a Deck).
+  -- Clamp to 1 minimum so existingCount is never negative.
+  local function safeQty(obj, fallback)
+    local ok, qty = pcall(function() return obj.getQuantity() end)
+    if ok and qty and qty >= 1 then return qty end
+    return fallback
+  end
+
+  local existingByRank = {}
+  for rank, meld in pairs(state.meldsByRank) do
+    existingByRank[rank] = {obj=meld.obj, count=safeQty(meld.obj, 1), isBook=false}
+  end
+  for _, bookList in pairs(state.books) do
+    for _, book in ipairs(bookList) do
+      if book.rank and not existingByRank[book.rank] then
+        existingByRank[book.rank] = {obj=book.obj, count=safeQty(book.obj, 7), isBook=true}
       end
-      local projected = existingCount + count
-      local priority, reason
-      if existingMeld and existingCount < 7 and projected >= 7 then
-        priority = 1
-        reason = string.format("completes book: %d + %d = %d", existingCount, count, projected)
-      elseif existingMeld then
-        priority = 2
-        reason = string.format("extends meld: %d on table + %d from hand", existingCount, count)
-      else
-        priority = 3
-        reason = string.format("new meld: %d cards of rank %s", count, rank)
-      end
-      local cards = {}
-      for _, card in ipairs(state.hand) do
-        if card.rank == rank then table.insert(cards, card) end
-      end
-      table.insert(plans, {
-        rank=rank, cards=cards, count=count,
-        existingCount=existingCount, priority=priority, reason=reason,
-      })
     end
   end
+
+  local plans = {}
+  for rank, count in pairs(state.handByRank) do
+    if isEligibleRank(rank) then
+      local existing      = existingByRank[rank]
+      local existingCount = existing and existing.count or 0
+
+      -- Include if we can start a new meld (count>=3) OR extend an existing one (any count).
+      if count >= 3 or existing then
+        local projected = existingCount + count
+        local priority, reason
+        if existing and existingCount < 7 and projected >= 7 then
+          priority = 1
+          reason = string.format("completes book: %d + %d = %d", existingCount, count, projected)
+        elseif existing then
+          priority = 2
+          reason = string.format("extends %s: %d on table + %d from hand",
+            existing.isBook and "book" or "meld", existingCount, count)
+        else
+          priority = 3
+          reason = string.format("new meld: %d cards of rank %s", count, rank)
+        end
+
+        local cards = {}
+        for _, card in ipairs(state.hand) do
+          if card.rank == rank then table.insert(cards, card) end
+        end
+        table.insert(plans, {
+          rank=rank, cards=cards, count=count,
+          existingCount=existingCount, priority=priority, reason=reason,
+        })
+      end
+    end
+  end
+
   table.sort(plans, function(a, b)
     if a.priority ~= b.priority then return a.priority < b.priority end
     return a.count > b.count
@@ -4021,91 +4084,159 @@ function evalMeldsToPlay(state)
   return plans
 end
 
--- Discard tier for a non-wild card.  Lower tier = discard sooner.
--- To adjust rank priorities, edit this table.
--- Tiers: 0=black 3s, 1=low(4-7), 2=mid(8-K), 3=ace, 99=red 3s (skip)
-local gt_DISCARD_TIER = {
-  ["4"]=1, ["5"]=1, ["6"]=1, ["7"]=1,
-  ["8"]=2, ["9"]=2, ["10"]=2, ["J"]=2, ["Q"]=2, ["K"]=2,
+-- Strata for eligible ranks (4-7=1, 8-K=2, A=3).
+-- Lower strata = discard sooner.
+local gt_DISCARD_STRATA = {
+  ["4"]=1,["5"]=1,["6"]=1,["7"]=1,
+  ["8"]=2,["9"]=2,["10"]=2,["J"]=2,["Q"]=2,["K"]=2,
   ["A"]=3,
 }
-local function discardTier(card)
-  if card.rank == "3" then
-    return card.color == "Black" and 0 or 99  -- black 3s first; skip red 3s
-  end
-  return gt_DISCARD_TIER[card.rank] or 2
-end
+-- Rank ordering within a strata for tiebreaker (higher = discard first).
+local gt_RANK_WITHIN_STRATA = {
+  ["4"]=1,["5"]=2,["6"]=3,["7"]=4,
+  ["8"]=1,["9"]=2,["10"]=3,["J"]=4,["Q"]=5,["K"]=6,
+  ["A"]=1,
+}
 
 -- What card to discard after planned melds? Returns {card=entry_or_nil, reason=string}
 --
--- Rules (in priority order):
---   FILTER — never discard a wild while any non-wild remains
---   FILTER — never discard a red 3 (handled by the red-3 mechanic)
---   TIER   — black 3s first, then ranks 4-7, then 8-K, then Aces
---   COUNT  — within a tier, fewest copies remaining first (1-of before 2-of, etc.)
---   WILDS  — only if no non-wilds remain: 2s before Jokers
+-- Priority pipeline:
+--  1. Black 3s — always first.
+--  2. Non-wild, non-3 candidates only (red 3s never discarded; wilds held for last).
+--  3. Minimum count: singletons before pairs before triples, etc.
+--  4. Lowest strata within min-count: strata 1 (4-7) → 2 (8-K) → 3 (A).
+--  5. Prefer same-color sets (all-Red or all-Black) within chosen strata/count.
+--  6. Within chosen set, prefer the card whose removal leaves ≥1 of each color.
+--  7. Tiebreaker: highest rank within the strata (K before 8, 7 before 4, etc.).
+--  8. Wild fallback (no non-wilds left): 2s before Jokers.
+--  9. Absolute fallback: first remaining card.
 function evalDiscard(state, meldPlan)
-  -- Build set of ranks being played as melds this turn
   local melding = {}
   for _, m in ipairs(meldPlan) do melding[m.rank] = true end
 
-  -- Cards remaining in hand after planned melds
-  local remaining    = {}
-  local remainByRank = {}
+  local remaining = {}
   for _, card in ipairs(state.hand) do
-    if not melding[card.rank] then
-      table.insert(remaining, card)
-      if card.color ~= "Wild" and card.rank ~= "3" then
-        remainByRank[card.rank] = (remainByRank[card.rank] or 0) + 1
-      end
-    end
+    if not melding[card.rank] then table.insert(remaining, card) end
   end
 
   if #remaining == 0 then
     return {card=nil, reason="hand emptied by melds (go out)"}
   end
 
-  -- FILTER: determine whether any non-wild remains (controls wild eligibility)
-  local hasNonWild = false
+  -- RULE 1: Black 3 always first.
   for _, card in ipairs(remaining) do
-    if card.color ~= "Wild" then hasNonWild = true; break end
+    if card.rank == "3" and card.color == "Black" then
+      return {card=card, reason="black 3 — always discard first"}
+    end
   end
 
-  -- Score each candidate; lower score = better discard choice.
-  -- Score = tier * 1000 + count
-  --   tier  — from discardTier() or wild tiers (10=2, 11=Joker)
-  --   count — copies of this rank remaining (prefer discarding singletons)
-  local best, bestScore, bestReason = nil, math.huge, "no suitable discard found"
+  -- Partition into eligible candidates (non-wild, non-3) and wilds.
+  local candidates, wilds = {}, {}
   for _, card in ipairs(remaining) do
-    local tier, count, skip = 0, 0, false
-
     if card.color == "Wild" then
-      if hasNonWild then skip = true           -- FILTER: save wilds while non-wilds exist
-      elseif card.rank == "Joker" then tier = 11  -- 2s before Jokers
-      else tier = 10 end
-      count = 0
-    else
-      tier = discardTier(card)
-      if tier == 99 then skip = true end       -- FILTER: skip red 3s
-      count = remainByRank[card.rank] or 1
+      table.insert(wilds, card)
+    elseif card.rank ~= "3" then          -- red 3s silently skipped
+      table.insert(candidates, card)
     end
+  end
 
-    if not skip then
-      local score = tier * 1000 + count
-      if score < bestScore then
-        bestScore  = score
-        best       = card
-        if card.color == "Wild" then
-          bestReason = string.format("wild %s (no non-wilds remain, tier %d)", card.rank, tier)
-        else
-          bestReason = string.format("%s: tier %d, %d of rank remaining", card.rank, tier, count)
-        end
+  -- RULE 8: Wild fallback only when no candidates remain.
+  if #candidates == 0 then
+    table.sort(wilds, function(a, b)
+      return (a.rank == "Joker" and 1 or 0) < (b.rank == "Joker" and 1 or 0)
+    end)
+    if #wilds > 0 then
+      return {card=wilds[1], reason=string.format("wild %s (no non-wilds remain — 2s before Jokers)", wilds[1].rank)}
+    end
+    return {card=remaining[1], reason="absolute fallback"}
+  end
+
+  -- Group candidates by rank: byRank[rank] = {cards=[]}
+  local byRank = {}
+  for _, card in ipairs(candidates) do
+    if not byRank[card.rank] then byRank[card.rank] = {rank=card.rank, cards={}} end
+    table.insert(byRank[card.rank].cards, card)
+  end
+
+  -- Build flat list of rank-groups.
+  local groups = {}
+  for _, g in pairs(byRank) do table.insert(groups, g) end
+
+  -- RULE 3: Minimum count across all groups.
+  local minCount = math.huge
+  for _, g in ipairs(groups) do
+    if #g.cards < minCount then minCount = #g.cards end
+  end
+  local atMinCount = {}
+  for _, g in ipairs(groups) do
+    if #g.cards == minCount then table.insert(atMinCount, g) end
+  end
+
+  -- RULE 4: Lowest strata within min-count groups.
+  local minStrata = math.huge
+  for _, g in ipairs(atMinCount) do
+    local s = gt_DISCARD_STRATA[g.rank] or 2
+    if s < minStrata then minStrata = s end
+  end
+  local atMinStrata = {}
+  for _, g in ipairs(atMinCount) do
+    if (gt_DISCARD_STRATA[g.rank] or 2) == minStrata then
+      table.insert(atMinStrata, g)
+    end
+  end
+
+  -- RULE 5: Prefer same-color (mono-color) groups.
+  local function isMono(g)
+    local c = nil
+    for _, card in ipairs(g.cards) do
+      if c == nil then c = card.color
+      elseif card.color ~= c then return false end
+    end
+    return true
+  end
+  local mono = {}
+  for _, g in ipairs(atMinStrata) do
+    if isMono(g) then table.insert(mono, g) end
+  end
+  local pool = (#mono > 0) and mono or atMinStrata
+
+  -- RULE 7: Tiebreaker — highest rank within strata (across remaining pool).
+  table.sort(pool, function(a, b)
+    return (gt_RANK_WITHIN_STRATA[a.rank] or 0) > (gt_RANK_WITHIN_STRATA[b.rank] or 0)
+  end)
+  local chosen = pool[1]
+
+  -- RULE 6: Within chosen group, pick card that leaves ≥1 of each color.
+  local function colorCounts(cards)
+    local cc = {}
+    for _, c in ipairs(cards) do cc[c.color] = (cc[c.color] or 0) + 1 end
+    return cc
+  end
+  local function removingCardKeepsBalance(card, groupCards)
+    local cc = colorCounts(groupCards)
+    cc[card.color] = cc[card.color] - 1
+    for _, cnt in pairs(cc) do if cnt < 1 then return false end end
+    return true
+  end
+
+  local pick = nil
+  if #chosen.cards == 1 then
+    pick = chosen.cards[1]
+  else
+    for _, card in ipairs(chosen.cards) do
+      if removingCardKeepsBalance(card, chosen.cards) then
+        pick = card; break
       end
     end
+    if not pick then pick = chosen.cards[1] end
   end
 
-  if best then return {card=best, reason=bestReason} end
-  return {card=remaining[1], reason="fallback: only unplayable cards remain"}
+  local reason = string.format(
+    "%s — count=%d strata=%d rank-slot=%d%s",
+    chosen.rank, minCount, minStrata,
+    gt_RANK_WITHIN_STRATA[chosen.rank] or 0,
+    isMono(chosen) and " [mono-color]" or "")
+  return {card=pick, reason=reason}
 end
 
 -- Assembles a complete TurnPlan. Returns plain table; nothing is moved.
@@ -4298,10 +4429,15 @@ function getRedThreeMeldPos(sColor)
   end
   if not footPilePos then return nil end
 
-  -- Offset "below" the foot pile: away from board center (toward the player's edge).
-  -- direction = toward-center sign, so -direction = away from center.
-  local gap = gv_CARD_SIZE.z * 2.5
+  -- Place the red-3 stack below (toward the player's edge) the foot pile,
+  -- in line with it along the lateral axis.
+  -- The foot pile sits at the outer edge of the scoring zone in the depth
+  -- direction, so "below" technically exits the scoring zone.  This is
+  -- fine visually — the card is placed face-down first (hand zones only
+  -- reclaim face-up cards), then flipped face-up once settled.
+  local gap = gv_CARD_SIZE.z * 1.5   -- ~3 units below the foot pile
   local pos = {x=footPilePos.x, y=footPilePos.y, z=footPilePos.z}
+  -- -direction moves AWAY from board center (toward the player's edge).
   pos[depthAxis] = footPilePos[depthAxis] - direction * gap
   return pos
 end
@@ -4347,7 +4483,18 @@ function handleRedThrees(sColor, callback, depth)
     local captured = card
     local pos      = targetPos
     Wait.time(function()
-      pcall(function() captured.setPosition(pos) end)
+      pcall(function()
+        -- Flip face-down before placing so the native hand zone doesn't
+        -- reclaim the card (hand zones only process face-up cards).
+        -- Flip back face-up once the card is settled at the target position.
+        captured.flip()
+        captured.setPosition(pos)
+        Wait.time(function()
+          pcall(function() if not captured.is_face_down then return end
+            captured.flip()
+          end)
+        end, 0.4)
+      end)
     end, t)
     t = t + 0.3
     -- Draw a replacement card from the main deck for each red 3 played
@@ -4665,9 +4812,6 @@ function planLayoutRank(sColor, rank)
     end
   end
 
-  if #rankCards < 3 then
-    return {ok=false, reason="Need at least 3 of rank " .. rank .. " (have " .. #rankCards .. ")"}
-  end
   if (#handCards - #rankCards) < 2 then
     return {ok=false, reason="Cannot play: would leave fewer than 2 cards in hand"}
   end
@@ -4684,6 +4828,12 @@ function planLayoutRank(sColor, rank)
       if ok and qty and qty >= 7 then isBook = true end
     end
     if not isBook then table.insert(existingCards, obj) end
+  end
+
+  -- Require 3+ cards to start a new meld; any count is fine when extending an existing one.
+  local minCards = (#existingCards > 0) and 1 or 3
+  if #rankCards < minCards then
+    return {ok=false, reason="Need at least " .. minCards .. " of rank " .. rank .. " (have " .. #rankCards .. ")"}
   end
 
   local targetPos
@@ -6414,6 +6564,7 @@ function onChat(message, sender)
   end
 
   if (string.gsub(message,"%s+","")=="#help") then
+    Player[sColor].print ("#reinit : restore object refs after hot script push")
     Player[sColor].print ("#init : reset board")
     Player[sColor].print ("#sort <string> [, <color>] : change sort")
     Player[sColor].print ("#sort help : sort help")
@@ -6438,6 +6589,33 @@ function onChat(message, sender)
   if string.gsub(message,"%s+","")=="#plan" then
     local plan = buildTurnPlan(sColor)
     printTurnPlan(plan, sColor)
+    return false
+  end
+
+  if string.gsub(message,"%s+","")=="#reinit" then
+    local ok, err = pcall(function() onLoad("") end)
+    if ok then
+      Player[sColor].print("Reinit OK.")
+    else
+      Player[sColor].print("Reinit ERROR: " .. tostring(err))
+    end
+    return false
+  end
+
+  if string.gsub(message,"%s+","")=="#status" then
+    local p = function(s) Player[sColor].print(s) end
+    p("=== Script State ===")
+    p("obj_Zone_Discard: " .. tostring(obj_Zone_Discard))
+    p("objScoreZones: "    .. tostring(objScoreZones))
+    p("giPlayerCount: "    .. tostring(giPlayerCount))
+    p("mainDeck: "         .. tostring(mainDeck))
+    p("goSurface: "        .. tostring(goSurface))
+    p("text_score_white: " .. tostring(text_score_white))
+    p("textDiscardValue: " .. tostring(textDiscardValue))
+    p("playerStuff: "      .. tostring(playerStuff))
+    p("giRuleSet: "        .. tostring(giRuleSet))
+    p("giStartFootCards: " .. tostring(giStartFootCards))
+    p("UI_TABLETOP_SURFACE: " .. tostring(UI_TABLETOP_SURFACE))
     return false
   end
 
@@ -6871,6 +7049,24 @@ function sortHand(obj, player_color)
 	local handPos = {}
 	-- Grab the list of cards in the hand.  We'll use this to populate our tables.
 	handObjects = Player[player_color].getHandObjects()
+	-- Filter out any cards that are physically in the discard zone.
+	-- Scripted discards (setPositionSmooth) may not immediately unregister from
+	-- getHandObjects(), so we cross-check against the zone's actual contents.
+	if obj_Zone_Discard then
+	  pcall(function()
+	    local discardGuids = {}
+	    for _, dObj in ipairs(obj_Zone_Discard.getObjects()) do
+	      discardGuids[dObj.guid] = true
+	    end
+	    local filtered = {}
+	    for _, hObj in ipairs(handObjects) do
+	      if not discardGuids[hObj.guid] then
+	        table.insert(filtered, hObj)
+	      end
+	    end
+	    handObjects = filtered
+	  end)
+	end
 	-- Flag to indicate whether the error handling routine found an improperly named card.
 	ErrorMode = 0
 
@@ -6964,6 +7160,26 @@ function sortHand(obj, player_color)
       end
   end
 
+
+	-- Sort the slot positions spatially so sorted card[1] always maps to the
+	-- "first" slot (left or right depending on bSortLowLeft).
+	-- getHandObjects() returns cards in TTS internal order, not positional order,
+	-- so without this step the assignment is to arbitrary slots.
+	do
+	  local xMin, xMax, zMin, zMax = math.huge, -math.huge, math.huge, -math.huge
+	  for _, p in ipairs(handPos) do
+	    if p.x < xMin then xMin = p.x end
+	    if p.x > xMax then xMax = p.x end
+	    if p.z < zMin then zMin = p.z end
+	    if p.z > zMax then zMax = p.z end
+	  end
+	  local bSpreadX = (xMax - xMin) >= (zMax - zMin)
+	  local bAsc = playerStuff[player_color].bSortLowLeft
+	  table.sort(handPos, function(a, b)
+	    if bSpreadX then return bAsc and (a.x < b.x) or (a.x > b.x)
+	    else             return bAsc and (a.z < b.z) or (a.z > b.z) end
+	  end)
+	end
 
 	-- Take the sorted list of cards and apply the list of card positions in order to physically rearrange them.
 	for i, j in ipairs(cards) do
