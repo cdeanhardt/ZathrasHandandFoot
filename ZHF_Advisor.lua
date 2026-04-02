@@ -106,18 +106,27 @@ function snapshotState(sColor)
     wild  = #books.wild,
   }
 
+  local otherFootOnTable = false
+  for _, otherColor in ipairs(playerList or {}) do
+    if otherColor ~= sColor and playerHasFoot(otherColor) then
+      otherFootOnTable = true
+      break
+    end
+  end
+
   return {
-    color       = sColor,
-    hand        = hand,
-    handCount   = #hand,
-    handByRank  = handByRank,
-    wildCount   = wildCount,
-    melds       = melds,
-    meldsByRank = meldsByRank,
-    books       = books,
-    bookCounts  = bookCounts,
-    hasFoot     = playerHasFoot(sColor),
-    canGoOut    = (bookCounts.red >= 2 and bookCounts.black >= 2),
+    color            = sColor,
+    hand             = hand,
+    handCount        = #hand,
+    handByRank       = handByRank,
+    wildCount        = wildCount,
+    melds            = melds,
+    meldsByRank      = meldsByRank,
+    books            = books,
+    bookCounts       = bookCounts,
+    hasFoot          = playerHasFoot(sColor),
+    canGoOut         = (bookCounts.red >= 2 and bookCounts.black >= 2),
+    otherFootOnTable = otherFootOnTable,
   }
 end
 
@@ -382,28 +391,44 @@ end
 -- ----------------------------------------------------------------------------
 
 -- evalWildAllocations: decide which wilds to play and where.
--- Each returned entry: {rank, meldObj, naturalCards, wilds, existingCount, isNew, priority, reason}
--- Priority 1 = completes book; Priority 2 = new meld with 2 naturals + 1 wild.
+-- Called after evalMeldsToPlay so projected meld counts include natural plays.
+--
+-- Each returned entry:
+--   {rank, meldObj, naturalCards, wilds, existingCount, isNew, priority, completesBook, reason}
+--
+-- Priority tiers (allocation order, only applied when the caller decides wilds are allowed):
+--   1 — new meld from a hand pair (2 naturals + 1 wild)
+--   2 — extend a pre-existing meld on the table (1 wild, up to 2-wild limit)
+--   3 — any remaining meld with < 2 wilds, fewest cards first
 function evalWildAllocations(state, meldPlan)
   if state.wildCount == 0 then return {} end
 
-  -- Count all cards in a meld column of `rank`, including wilds already mixed in.
-  -- Stacked Decks: getQuantity() includes wilds. Books (qty>=7) excluded.
-  -- Spread melds: count natural cards + wild Cards at the same lateral position.
-  local rotY       = getPlayerRotY(state.color)
-  local decode     = gt_DECODE_DIR[rotY]
+  local rotY        = getPlayerRotY(state.color)
+  local decode      = gt_DECODE_DIR[rotY]
   local lateralAxis = decode and decode[1] or "x"
 
-  local function countMeldCards(rank)
+  -- Returns (total, wilds) for an existing non-book meld column.
+  local function getMeldInfo(rank)
     local naturalObjs = getTableCardsOfRank(state.color, rank)
-    if #naturalObjs == 0 then return 0 end
-    local total = 0
+    if #naturalObjs == 0 then return 0, 0 end
+    local total, wilds = 0, 0
     local spreadLats = {}
     for _, obj in ipairs(naturalObjs) do
       if obj.tag == "Deck" then
         local ok, qty = pcall(function() return obj.getQuantity() end)
         local q = (ok and qty and qty >= 1) and qty or 1
-        if q < 7 then total = total + q end
+        if q < 7 then
+          total = total + q
+          local ok2, cards = pcall(function() return obj.getObjects() end)
+          if ok2 and cards then
+            for _, c in ipairs(cards) do
+              pcall(function()
+                local cl, _, _ = cardDeets(c)
+                if cl == "Wild" then wilds = wilds + 1 end
+              end)
+            end
+          end
+        end
       else
         total = total + 1
         local ok, pos = pcall(function() return obj.getPosition() end)
@@ -427,6 +452,7 @@ function evalWildAllocations(state, meldPlan)
                     local ok_p, pos = pcall(function() return obj.getPosition() end)
                     if ok_p and pos and math.abs(pos[lateralAxis] - avgLat) < 1.5 then
                       total = total + 1
+                      wilds = wilds + 1
                     end
                   end
                 end
@@ -436,140 +462,200 @@ function evalWildAllocations(state, meldPlan)
         end
       end
     end
-    return total
+    return total, wilds
   end
 
-  -- projected is a LIST (not map) so book+meld of same rank are separate entries.
-  local projected = {}
+  -- Mutable meld table: rank → {rank, obj, total, wilds, isNew, naturals}
+  -- obj ~= nil  ↔  meld already existed on table before this turn
+  local melds = {}
+
   for rank, meld in pairs(state.meldsByRank) do
-    local cnt = countMeldCards(rank)
-    if cnt > 0 then
-      table.insert(projected, {rank=rank, count=cnt, obj=meld.obj, isBook=false})
-    end
-  end
-  for _, bookList in pairs(state.books) do
-    for _, book in ipairs(bookList) do
-      if book.rank then
-        local ok, qty = pcall(function() return book.obj.getQuantity() end)
-        table.insert(projected, {
-          rank=book.rank, count=(ok and qty and qty >= 1) and qty or 7,
-          obj=book.obj, isBook=true,
-        })
-      end
+    if rank ~= "3" then   -- red 3 stack is never a meld target
+      local tot, wlds = getMeldInfo(rank)
+      local isWildMeld = (rank == "2" or rank == "Joker")
+      melds[rank] = {rank=rank, obj=meld.obj, total=tot, wilds=wlds,
+                     isNew=false, isWildMeld=isWildMeld, naturals={}}
     end
   end
   for _, m in ipairs(meldPlan) do
-    local found = false
-    for _, p in ipairs(projected) do
-      if p.rank == m.rank and not p.isBook then p.count = p.count + m.count; found = true; break end
-    end
-    if not found then
-      table.insert(projected, {rank=m.rank, count=m.count, obj=nil, isBook=false})
+    if isEligibleRank(m.rank) then
+      if melds[m.rank] then
+        melds[m.rank].total = melds[m.rank].total + m.count
+      else
+        melds[m.rank] = {rank=m.rank, obj=nil, total=m.count, wilds=0,
+                         isNew=true, isWildMeld=false, naturals=m.cards or {}}
+      end
     end
   end
 
+  -- Gather wilds: 2s before Jokers
   local wildCards = {}
   for _, card in ipairs(state.hand) do
     if card.color == "Wild" then table.insert(wildCards, card) end
   end
   table.sort(wildCards, function(a, b)
-    return ((a.rank == "Joker") and 1 or 0) < ((b.rank == "Joker") and 1 or 0)
+    return (a.rank == "Joker" and 1 or 0) < (b.rank == "Joker" and 1 or 0)
   end)
 
-  local wildsLeft = #wildCards
-  local nextWild  = 1
-  local allocs    = {}
+  local nextWild = 1
+  local allocs   = {}
 
-  local completable = {}
-  for i, info in ipairs(projected) do
-    if not info.isBook and info.count > 0 and info.count < 7 and isEligibleRank(info.rank) then
-      local need = 7 - info.count
-      if need <= wildsLeft then
-        table.insert(completable, {idx=i, rank=info.rank, count=info.count, obj=info.obj, need=need})
+  -- Place one wild into rank's meld. Returns false if no wild available or meld full.
+  -- Special case: if the meld was created this turn (obj==nil) and already had one wild
+  -- assigned (isNew==false after first assignWild call), append the wild to the most
+  -- recent alloc for this rank rather than creating a new alloc with meldObj=nil that
+  -- the executor cannot resolve.
+  local function assignWild(rank, priority, reason)
+    if nextWild > #wildCards then return false end
+    local m = melds[rank]
+    if not m or m.total >= 7 then return false end
+    if not m.isWildMeld and m.wilds >= 2 then return false end
+    m.total = m.total + 1
+    m.wilds = m.wilds + 1
+    local completesBook = (m.total >= 7)
+    -- Merge into existing alloc when this is a follow-on wild for a Phase 1 new meld.
+    if not m.isWildMeld and m.obj == nil and not m.isNew then
+      for i = #allocs, 1, -1 do
+        if allocs[i].rank == rank then
+          table.insert(allocs[i].wilds, wildCards[nextWild])
+          allocs[i].completesBook = allocs[i].completesBook or completesBook
+          nextWild = nextWild + 1
+          return true
+        end
       end
     end
-  end
-  table.sort(completable, function(a, b) return a.need < b.need end)
-
-  for _, target in ipairs(completable) do
-    if wildsLeft < target.need then break end
-    if not projected[target.idx].isBook then
-      local assigned = {}
-      for i = 1, target.need do
-        table.insert(assigned, wildCards[nextWild]); nextWild = nextWild + 1
-      end
-      wildsLeft = wildsLeft - target.need
-      table.insert(allocs, {
-        rank=target.rank, meldObj=target.obj, naturalCards={}, wilds=assigned,
-        existingCount=target.count, isNew=false, priority=1,
-        reason=string.format("completes book: %d + %d wild = 7", target.count, target.need),
-      })
-      projected[target.idx].count  = 7
-      projected[target.idx].isBook = true
-    end
+    local naturals = m.naturals or {}
+    m.naturals = {}
+    table.insert(allocs, {
+      rank          = rank,
+      meldObj       = m.obj,
+      naturalCards  = naturals,
+      wilds         = {wildCards[nextWild]},
+      existingCount = m.total - 1,
+      isNew         = m.isNew,
+      priority      = priority,
+      completesBook = completesBook,
+      reason        = reason,
+    })
+    nextWild = nextWild + 1
+    m.isNew  = false
+    return true
   end
 
-  -- hasMeld at broader scope so Phase 2 and go-out rebalance share it.
-  local hasMeld = {}
-  for _, p in ipairs(projected) do if not p.isBook then hasMeld[p.rank] = true end end
+  local hasFoot   = state.hasFoot
+  local otherFoot = state.otherFootOnTable
 
-  if wildsLeft >= 1 then
+  -- Eligibility predicate: can this meld accept one more wild?
+  --   Wild melds:              always (no 2-wild cap, up to 7).
+  --   New rank melds (obj==nil): up to 2-wild cap, always extendable regardless of foot status.
+  --   Pre-existing rank melds:  only when player has no foot (going-out scenario), under cap.
+  -- NOTE: use m.obj==nil (not m.isNew) — isNew is reset by the first assignWild call.
+  local function canExtend(m)
+    if m.total >= 7 then return false end
+    if m.isWildMeld then return true end   -- wild melds: no 2-wild cap
+    if m.wilds >= 2  then return false end -- rank melds: enforce 2-wild cap
+    if m.obj == nil  then return true end  -- new this turn: always extendable
+    return not hasFoot                     -- pre-existing: only when going out
+  end
+
+  -- Rank priority for Phase 1 pair selection (highest value first → more points as a book).
+  local rankPriority = {
+    ["A"]=13,["K"]=12,["Q"]=11,["J"]=10,["10"]=9,
+    ["9"]=8,["8"]=7,["7"]=6,["6"]=5,["5"]=4,["4"]=3,
+  }
+
+  -- Phase 1: hand pairs (exactly 2 naturals, no existing meld) → 1 wild → new rank meld of 3.
+  -- When player has foot: only allowed if no other player has their foot, capped at 2 new melds.
+  -- When player has no foot (going out): all pairs eligible, no cap.
+  -- Pairs are processed highest-rank first so the cap eliminates low-value pairs, not high ones.
+  local phase1Allowed = not hasFoot or not otherFoot
+  local phase1Cap     = (hasFoot and not otherFoot) and 2 or math.huge
+  if phase1Allowed then
+    local eligiblePairs = {}
     for rank, count in pairs(state.handByRank) do
-      if wildsLeft >= 1 and isEligibleRank(rank) and not hasMeld[rank] and count == 2 then
-        local assigned = {wildCards[nextWild]}; nextWild = nextWild + 1; wildsLeft = wildsLeft - 1
-        local naturalCards = {}
-        for _, card in ipairs(state.hand) do
-          if card.rank == rank then table.insert(naturalCards, card) end
-        end
-        table.insert(allocs, {
-          rank=rank, meldObj=nil, naturalCards=naturalCards, wilds=assigned,
-          existingCount=0, isNew=true, priority=2,
-          reason=string.format("new meld: 2 × %s + 1 wild", rank),
-        })
-        table.insert(projected, {rank=rank, count=3, obj=nil, isBook=false})
-        hasMeld[rank] = true
+      if isEligibleRank(rank) and count == 2 and not melds[rank] then
+        table.insert(eligiblePairs, rank)
       end
+    end
+    table.sort(eligiblePairs, function(a, b)
+      return (rankPriority[a] or 0) > (rankPriority[b] or 0)
+    end)
+    local phase1Count = 0
+    for _, rank in ipairs(eligiblePairs) do
+      if nextWild > #wildCards or phase1Count >= phase1Cap then break end
+      local naturalCards = {}
+      for _, card in ipairs(state.hand) do
+        if card.rank == rank then table.insert(naturalCards, card) end
+      end
+      melds[rank] = {rank=rank, obj=nil, total=2, wilds=0, isNew=true, isWildMeld=false, naturals=naturalCards}
+      local label = (hasFoot and not otherFoot)
+        and string.format("new meld: 2 × %s + 1 wild (foot-pickup play, %d/2)", rank, phase1Count+1)
+        or  string.format("new meld: 2 × %s + 1 wild (hand pair)", rank)
+      assignWild(rank, 1, label)
+      phase1Count = phase1Count + 1
     end
   end
 
-  -- Go-out rebalance: if Phase 1 exhausted all wilds but 2-natural groups remain,
-  -- and projBlack > 2, sacrifice one Phase 1 completion to fund each group.
-  if wildsLeft == 0 and not state.hasFoot then
-    local projBlack = state.bookCounts.black
-    for _, a in ipairs(allocs) do if a.priority == 1 then projBlack = projBlack + 1 end end
-    if projBlack > 2 then
-      local consumedRanks = {}
-      for _, m in ipairs(meldPlan) do consumedRanks[m.rank] = true end
-      for _, a in ipairs(allocs) do
-        for _, c in ipairs(a.naturalCards) do consumedRanks[c.rank] = true end
-      end
-      for rank, count in pairs(state.handByRank) do
-        if projBlack <= 2 then break end
-        if count == 2 and isEligibleRank(rank)
-           and not consumedRanks[rank] and not hasMeld[rank] then
-          local sacIdx, sacNeed = nil, 0
-          for i, a in ipairs(allocs) do
-            if a.priority == 1 and #a.wilds > sacNeed then
-              sacNeed = #a.wilds; sacIdx = i
-            end
-          end
-          if sacIdx then
-            local sacrificed = table.remove(allocs, sacIdx)
-            projBlack = projBlack - 1
-            local naturalCards = {}
-            for _, card in ipairs(state.hand) do
-              if card.rank == rank then table.insert(naturalCards, card) end
-            end
-            table.insert(allocs, {
-              rank=rank, meldObj=nil, naturalCards=naturalCards,
-              wilds={sacrificed.wilds[1]}, existingCount=0, isNew=true, priority=2,
-              reason=string.format("new meld: 2 × %s + 1 wild (go-out play)", rank),
-            })
-            hasMeld[rank] = true; consumedRanks[rank] = true
-          end
-        end
+  -- Phase 2: pre-existing melds on table (obj ~= nil) → 1 wild each.
+  -- Wild melds: always extend (preferred destination when hasFoot).
+  -- Rank melds: only when player has no foot (going out scenario).
+  do
+    local preExisting = {}
+    for rank, m in pairs(melds) do
+      if m.obj ~= nil and canExtend(m) then table.insert(preExisting, rank) end
+    end
+    for _, rank in ipairs(preExisting) do
+      if nextWild > #wildCards then break end
+      local m = melds[rank]
+      local label = m.isWildMeld
+        and string.format("extends wild meld (%d cards on table)", m.total)
+        or  string.format("extends own meld %s (%d cards on table)", rank, m.total)
+      assignWild(rank, 2, label)
+    end
+  end
+
+  -- Phase 3: remaining wilds → fewest-cards-first.
+  -- Wild melds always eligible; rank melds only when player has no foot (via canExtend).
+  while nextWild <= #wildCards do
+    local candidates = {}
+    for _, m in pairs(melds) do
+      if canExtend(m) then table.insert(candidates, m) end
+    end
+    if #candidates == 0 then break end
+    table.sort(candidates, function(a, b) return a.total < b.total end)
+    local placed = false
+    for _, m in ipairs(candidates) do
+      if canExtend(m) then  -- re-check: assignWild may have updated m.wilds/m.total
+        placed = assignWild(m.rank, 3,
+          string.format("extends %s (%d cards, fewest-first)",
+            m.isWildMeld and "wild meld" or ("meld "..m.rank), m.total))
+        if placed then break end
       end
     end
+    if not placed then break end
+  end
+
+  -- Phase 4: if 3+ wilds still unallocated and no wild meld exists on the table,
+  -- bundle them into a new pure wild meld.
+  local wildsLeft4 = #wildCards - nextWild + 1
+  if wildsLeft4 >= 3 and not melds["2"] and not melds["Joker"] then
+    local assigned = {}
+    while nextWild <= #wildCards do
+      table.insert(assigned, wildCards[nextWild])
+      nextWild = nextWild + 1
+    end
+    table.insert(allocs, {
+      rank         = "__wild__",
+      meldObj      = nil,
+      naturalCards = {},
+      wilds        = assigned,
+      existingCount = 0,
+      isNew        = true,
+      isWildMeld   = true,
+      priority     = 4,
+      completesBook = (#assigned >= 7),
+      reason       = string.format("new wild meld: %d wilds", #assigned),
+    })
   end
 
   return allocs
@@ -606,19 +692,14 @@ function buildTurnPlan(sColor)
     end
   end
 
+  -- Compute wild allocs now (needed for go-out projection), but only keep them
+  -- if the plan actually results in going out this turn.
   local wildAllocs = evalWildAllocations(state, melds)
-  if #wildAllocs == 0 then
-    if state.wildCount > 0 then L("Wild plays: no useful allocation found") end
-  else
-    for _, wa in ipairs(wildAllocs) do
-      L(string.format("  [w%d] %s — %s", wa.priority, wa.rank, wa.reason))
-    end
-  end
 
   local projRed   = state.bookCounts.red
   local projBlack = state.bookCounts.black
   for _, m  in ipairs(melds)      do if m.priority  == 1 then projRed   = projRed   + 1 end end
-  for _, wa in ipairs(wildAllocs) do if wa.priority == 1 then projBlack = projBlack + 1 end end
+  for _, wa in ipairs(wildAllocs) do if wa.completesBook then projBlack = projBlack + 1 end end
 
   local cardsConsumed = 0
   for _, m in ipairs(melds) do cardsConsumed = cardsConsumed + m.count end
@@ -634,6 +715,38 @@ function buildTurnPlan(sColor)
   elseif not state.hasFoot and projRed >= 2 and projBlack >= 2 and not goOut.should then
     L(string.format("Projected go-out: books met (red=%d black=%d) but %d cards remain",
       projRed, projBlack, projHandCount))
+  end
+
+  -- Wild plays are allowed when ALL of:
+  --   (a) the plays would empty the hand (projHandCount <= 1, last card = discard), AND
+  --   (b) no other player has their foot on the table (end-game), OR going out this turn.
+  -- Wild cards are NEVER discarded unless all remaining cards are wild (evalDiscard rule 8).
+  local allowWilds = (projHandCount <= 1) and
+    (not state.otherFootOnTable or goOut.should)
+
+  if not allowWilds then
+    if #wildAllocs > 0 then
+      local why
+      if projHandCount > 1 then
+        why = "plays would not empty hand"
+      elseif state.otherFootOnTable then
+        why = "other players still have foot on table"
+      else
+        why = "conditions not met"
+      end
+      L(string.format("Wild plays: suppressed (%d alloc(s) — %s)", #wildAllocs, why))
+    elseif state.wildCount > 0 then
+      L("Wild plays: held — conditions not met")
+    end
+    wildAllocs = {}
+  else
+    if #wildAllocs == 0 then
+      if state.wildCount > 0 then L("Wild plays: no useful allocation found") end
+    else
+      for _, wa in ipairs(wildAllocs) do
+        L(string.format("  [w%d] %s — %s", wa.priority, wa.rank, wa.reason))
+      end
+    end
   end
 
   local discard
