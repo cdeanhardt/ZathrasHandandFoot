@@ -504,6 +504,33 @@ function click_ActionDrawSortPlayLay(player)
   end, 2.5)
 end
 
+-- Compute the suggested discard for sColor and update the Discard button label.
+-- Called after draw + red-3 swaps + sort so the hand is stable.
+local _RANK_SHORT = {
+  ["Ace"]="A",["2"]="2",["3"]="3",["4"]="4",["5"]="5",
+  ["6"]="6",["7"]="7",["8"]="8",["9"]="9",["10"]="10",
+  ["Jack"]="J",["Queen"]="Q",["King"]="K",["Joker"]="Jo",
+}
+local _SUIT_SHORT = {
+  ["Clubs"]="C",["Diamonds"]="D",["Hearts"]="H",["Spades"]="S",
+}
+function updateDiscardButton(sColor)
+  local label = "Discard"
+  pcall(function()
+    local plan = buildTurnPlan(sColor)
+    if plan and plan.discard and plan.discard.card then
+      local c = plan.discard.card
+      local r = _RANK_SHORT[c.rank] or c.rank
+      local s = _SUIT_SHORT[c.suit] or ""
+      label = "Discard " .. r .. s
+    end
+  end)
+  pcall(function()
+    UI.setAttribute("btnDiscard", "text", label)
+    UI.setAttribute("btnDiscard", "textColor", "#FFFFFF")
+  end)
+end
+
 -- Draw 2 cards from the main deck then handle any red 3s that arrive.
 function click_ActionDraw(player)
   local sColor = player.color
@@ -544,6 +571,8 @@ function click_ActionDraw(player)
   Wait.time(function()
     handleRedThrees(sColor, function()
       Wait.time(function() sortHand(nil, sColor) end, 0.5)
+      -- After sort settles, compute and display the suggested discard.
+      Wait.time(function() updateDiscardButton(sColor) end, 1.5)
     end)
   end, 2.5)
 end
@@ -564,6 +593,10 @@ function click_ActionDiscard(player)
   local cardObj = result.card.obj
   broadcastToColor("Discarding: " .. result.card.rank .. " of " .. (result.card.suit or "?")
     .. " — " .. result.reason, sColor)
+  pcall(function()
+    UI.setAttribute("btnDiscard", "text", "Discard")
+    UI.setAttribute("btnDiscard", "textColor", "#FFFFFF")
+  end)
   pcall(function()
     local discardPos = obj_Zone_Discard.getPosition()
     -- Lift the card above the hand zone so TTS releases it from hand management,
@@ -4553,6 +4586,28 @@ function evalWildAllocations(state, meldPlan)
     end
   end
 
+  -- When needBlackBook, check if allowing Phase 1 (pairs+wild) would still empty the hand.
+  -- If so, picking up the foot outweighs the book strategy: lift the needBlackBook restriction
+  -- for Phase 1.  Estimate: meld-plan naturals + all eligible pairs + wilds for pairs + leftover
+  -- wilds bundled into a wild meld.  If total playable cards brings hand to <= 1, we can empty.
+  local canEmptyWithWilds = false
+  if needBlackBook then
+    local meldNaturals = 0
+    for _, m in ipairs(meldPlan) do meldNaturals = meldNaturals + m.count end
+    local pairsNaturals, wildsForPairs = 0, 0
+    for rank, count in pairs(state.handByRank) do
+      if isEligibleRank(rank) and count == 2 and not melds[rank] and not redBookRanks[rank] then
+        pairsNaturals = pairsNaturals + 2
+        wildsForPairs = wildsForPairs + 1
+      end
+    end
+    wildsForPairs = math.min(wildsForPairs, state.wildCount)
+    local wildsForMeld = state.wildCount - wildsForPairs
+    local wildMeldCards = (wildsForMeld >= 3) and wildsForMeld or 0
+    local totalPlayable = meldNaturals + pairsNaturals + wildsForPairs + wildMeldCards
+    canEmptyWithWilds = (state.handCount - totalPlayable <= 1)
+  end
+
   -- Gather wilds: 2s before Jokers
   local wildCards = {}
   for _, card in ipairs(state.hand) do
@@ -4639,9 +4694,10 @@ function evalWildAllocations(state, meldPlan)
   -- Phase 1: hand pairs (exactly 2 naturals, no existing meld) → 1 wild → new rank meld of 3.
   -- When player has foot: only allowed if no other player has their foot, capped at 2 new melds.
   -- When player has no foot (going out): all pairs eligible, no cap.
-  -- Suppressed entirely when needBlackBook: wilds are reserved for black/wild books.
+  -- Suppressed when needBlackBook unless canEmptyWithWilds: emptying hand to pick up foot
+  -- outweighs saving wilds for books.  When canEmptyWithWilds, foot/otherFoot gates also lifted.
   -- Pairs are processed highest-rank first so the cap eliminates low-value pairs, not high ones.
-  local phase1Allowed = (not hasFoot or not otherFoot) and not needBlackBook
+  local phase1Allowed = canEmptyWithWilds or ((not hasFoot or not otherFoot) and not needBlackBook)
   local phase1Cap     = (hasFoot and not otherFoot) and 2 or math.huge
   if phase1Allowed then
     local eligiblePairs = {}
@@ -4814,8 +4870,10 @@ function buildTurnPlan(sColor)
   --   (a) the plays would empty the hand (projHandCount <= 1, last card = discard), AND
   --   (b) no other player has their foot on the table (end-game), OR going out this turn.
   -- Wild cards are NEVER discarded unless all remaining cards are wild (evalDiscard rule 8).
+  -- Allow wild plays when emptying the hand: either going out, or picking up own foot
+  -- (hasFoot = foot still on table; emptying hand causes foot pickup regardless of other players).
   local allowWilds = (projHandCount <= 1) and
-    (not state.otherFootOnTable or goOut.should)
+    (not state.otherFootOnTable or goOut.should or state.hasFoot)
 
   if not allowWilds then
     if #wildAllocs > 0 then
@@ -5008,6 +5066,10 @@ function executeTurnPlan(plan)
   -- Discard fires after all melds and wild plays have finished.
   if plan.discard.card and not plan.goOut.should then
     Wait.time(function()
+      pcall(function()
+        UI.setAttribute("btnDiscard", "text", "Discard")
+        UI.setAttribute("btnDiscard", "textColor", "#FFFFFF")
+      end)
       pcall(function()
         local cardObj    = plan.discard.card.obj
         local discardPos = obj_Zone_Discard.getPosition()
