@@ -216,19 +216,24 @@
                     text=""
                     fontSize="12"
                     lineType="MultiLineNewline"
-                    interactable="false"
+                    interactable="true"
                     width="400" height="270"
                     rectAlignment="UpperCenter" offsetXY="0 -8"
                     colors="#FFFFFF|#FFFFFF|#FFFFFF|#FFFFFF"
                     textColor="#000000"
                     readOnly="true" />
         <Button id="btnPlanClose"
-                text="Close" width="196" height="30"
+                text="Close" width="126" height="30"
                 rectAlignment="LowerLeft" offsetXY="8 8"
                 color="#990000" textColor="#FFFFFF" fontSize="14"
                 onClick="click_PlanClose" />
+        <Button id="btnPlanCopy"
+                text="Copy to Chat" width="126" height="30"
+                rectAlignment="LowerCenter" offsetXY="0 8"
+                color="#445566" textColor="#FFFFFF" fontSize="14"
+                onClick="click_PlanCopy" />
         <Button id="btnPlanExecute"
-                text="Execute" width="196" height="30"
+                text="Execute" width="126" height="30"
                 rectAlignment="LowerRight" offsetXY="-8 8"
                 color="#226622" textColor="#FFFFFF" fontSize="14"
                 onClick="click_PlanExecute" />

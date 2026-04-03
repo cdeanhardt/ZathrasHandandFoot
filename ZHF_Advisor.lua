@@ -204,8 +204,12 @@ function evalMeldsToPlay(state)
   --   2 = complete a black book (existing meld has ≥1 wild)
   --   3 = extend an existing meld without completing it
   --   4 = start a new meld
-  -- Exception: suppress priority-1 plays when red books ≥ 2 but black books < 2
-  -- (hold back for a wild to complete the book as black instead).
+  -- Exception: after foot pickup, suppress priority-1 plays when red books > 1
+  -- but black books < 2 — hold that rank back so a wild completes it as a
+  -- black book instead.  Before foot pickup this restriction is lifted (still
+  -- in the first half of the hand; accumulating naturals is fine).
+  -- Once black books ≥ 2 the default priority ordering already favours red
+  -- book completion (p1) over black (p2), so no extra logic is needed.
   local plans = {}
   for rank, count in pairs(state.handByRank) do
     if isEligibleRank(rank) then
@@ -221,8 +225,10 @@ function evalMeldsToPlay(state)
         if existing and existingCount < 7 and projected >= 7 then
           local existingWilds = countMeldWilds(existing.obj)
           local isRedBook = (existingWilds == 0)
-          if isRedBook and state.bookCounts.red >= 2 and state.bookCounts.black < 2 then
-            -- Suppress: hold this rank back so a wild can complete it as a black book.
+          if isRedBook and not state.hasFoot
+              and state.bookCounts.red > 1 and state.bookCounts.black < 2 then
+            -- Suppress: foot picked up, already have 2+ red books but < 2 black.
+            -- Hold this rank back so a wild can complete it as a black book.
             skip = true
           else
             priority = isRedBook and 1 or 2
@@ -597,26 +603,81 @@ function evalWildAllocations(state, meldPlan)
     end
   end
 
-  -- When needBlackBook, check if allowing Phase 1 (pairs+wild) would still empty the hand.
-  -- If so, picking up the foot outweighs the book strategy: lift the needBlackBook restriction
-  -- for Phase 1.  Estimate: meld-plan naturals + all eligible pairs + wilds for pairs + leftover
-  -- wilds bundled into a wild meld.  If total playable cards brings hand to <= 1, we can empty.
+  -- *** These must be defined BEFORE canEmptyWithWilds / canEmptyViaWildMeld ***
+  local hasFoot       = state.hasFoot
+  local otherFoot     = state.otherFootOnTable
+  local needBlackBook = state.bookCounts.black < 2
+
+  -- How many wild-assisted pair melds are acceptable when emptying the hand to pick up the
+  -- foot.  Scales with game pressure from the other player(s):
+  --   otherFoot=true  (other still has foot on table)  → conservative: 1 pair
+  --   otherFoot=false (other has picked up foot)       → moderate: 2 pairs
+  --   otherFoot=false AND other player has 3+ books    → aggressive: 3 pairs
+  --   hasFoot=false   (self going out)                 → no cap
+  local emptyHandCap
+  if not hasFoot then
+    emptyHandCap = math.huge        -- going-out scenario: no restriction
+  elseif otherFoot then
+    emptyHandCap = 1                -- other player not yet in foot: be conservative
+  else
+    local otherBooks = 0
+    pcall(function()
+      for _, color in ipairs(playerList or {}) do
+        if color ~= state.color and not playerHasFoot(color) then
+          for _, m in ipairs(getMelds(color)) do
+            if m.isBook and classifyBook(m.obj) then otherBooks = otherBooks + 1 end
+          end
+        end
+      end
+    end)
+    emptyHandCap = (otherBooks >= 3) and 3 or 2
+  end
+
+  -- Check if playing pair melds (up to emptyHandCap) + remaining wilds as wild meld
+  -- would empty the hand.  When true, Phase 1 restrictions are lifted so the player
+  -- can pick up their foot.  Works regardless of needBlackBook.
+  -- NOTE: when canEmptyWithWilds is true, Phases 2 & 3 are skipped so remaining wilds
+  -- are not stolen by existing melds — they must flow to the Phase 4 wild meld.
   local canEmptyWithWilds = false
-  if needBlackBook then
+  if hasFoot then
     local meldNaturals = 0
     for _, m in ipairs(meldPlan) do meldNaturals = meldNaturals + m.count end
-    local pairsNaturals, wildsForPairs = 0, 0
+    local eligiblePairCount = 0
     for rank, count in pairs(state.handByRank) do
       if isEligibleRank(rank) and count == 2 and not melds[rank] and not redBookRanks[rank] then
-        pairsNaturals = pairsNaturals + 2
-        wildsForPairs = wildsForPairs + 1
+        eligiblePairCount = eligiblePairCount + 1
       end
     end
-    wildsForPairs = math.min(wildsForPairs, state.wildCount)
-    local wildsForMeld = state.wildCount - wildsForPairs
+    local pairsUsed    = math.min(eligiblePairCount, emptyHandCap)
+    local wildsForPairs = math.min(pairsUsed, state.wildCount)
+    local wildsForMeld  = state.wildCount - wildsForPairs
     local wildMeldCards = (wildsForMeld >= 3) and wildsForMeld or 0
-    local totalPlayable = meldNaturals + pairsNaturals + wildsForPairs + wildMeldCards
+    local totalPlayable = meldNaturals + pairsUsed * 2 + wildsForPairs + wildMeldCards
     canEmptyWithWilds = (state.handCount - totalPlayable <= 1)
+    if canEmptyWithWilds then
+      L(string.format("canEmptyWithWilds: %d naturals + %d pairs×2 + %d w→pairs + %d w→wildmeld = %d of %d",
+        meldNaturals, pairsUsed, wildsForPairs, wildMeldCards, totalPlayable, state.handCount))
+    end
+  end
+
+  -- Detect the pure "wild meld + one mixed meld empties hand" scenario:
+  -- foot on table, 4+ wilds, exactly 2 natural cards forming a pair.
+  -- All wilds: 1 goes to the mixed meld, the rest form a pure wild meld.
+  local canEmptyViaWildMeld = false
+  if hasFoot and state.wildCount >= 4 then
+    local naturalCount = state.handCount - state.wildCount
+    if naturalCount == 2 then
+      for rank, count in pairs(state.handByRank) do
+        if isEligibleRank(rank) and count >= 2 then
+          canEmptyViaWildMeld = true
+          break
+        end
+      end
+    end
+  end
+  if canEmptyViaWildMeld then
+    L("canEmptyViaWildMeld: foot on table, " .. state.wildCount ..
+      " wilds + 1 pair → wild meld + mixed meld")
   end
 
   -- Gather wilds: 2s before Jokers
@@ -677,12 +738,6 @@ function evalWildAllocations(state, meldPlan)
     return true
   end
 
-  local hasFoot      = state.hasFoot
-  local otherFoot    = state.otherFootOnTable
-  -- Suppress new rank-meld wild plays until the player has 2 black books.
-  -- Wilds are instead reserved for completing existing melds into black books, or a wild book.
-  local needBlackBook = state.bookCounts.black < 2
-
   -- Eligibility predicate: can this meld accept one more wild?
   --   Wild melds:              always (no 2-wild cap, up to 7).
   --   New rank melds (obj==nil): up to 2-wild cap, always extendable regardless of foot status.
@@ -703,13 +758,23 @@ function evalWildAllocations(state, meldPlan)
   }
 
   -- Phase 1: hand pairs (exactly 2 naturals, no existing meld) → 1 wild → new rank meld of 3.
-  -- When player has foot: only allowed if no other player has their foot, capped at 2 new melds.
-  -- When player has no foot (going out): all pairs eligible, no cap.
-  -- Suppressed when needBlackBook unless canEmptyWithWilds: emptying hand to pick up foot
-  -- outweighs saving wilds for books.  When canEmptyWithWilds, foot/otherFoot gates also lifted.
-  -- Pairs are processed highest-rank first so the cap eliminates low-value pairs, not high ones.
-  local phase1Allowed = canEmptyWithWilds or ((not hasFoot or not otherFoot) and not needBlackBook)
-  local phase1Cap     = (hasFoot and not otherFoot) and 2 or math.huge
+  -- When going out (no foot): all pairs eligible, no cap.
+  -- Suppressed when needBlackBook unless canEmptyWithWilds / canEmptyViaWildMeld.
+  -- canEmptyViaWildMeld: foot on table, 4+ wilds, 1 pair → exactly 1 wild, cap = 1.
+  -- canEmptyWithWilds: emptying hand with up to emptyHandCap pairs is beneficial.
+  -- Pairs are processed highest-rank first so the cap trims low-value pairs, not high ones.
+  local phase1Allowed = canEmptyViaWildMeld or canEmptyWithWilds or
+                        ((not hasFoot or not otherFoot) and not needBlackBook)
+  local phase1Cap
+  if canEmptyViaWildMeld then
+    phase1Cap = 1
+  elseif canEmptyWithWilds then
+    phase1Cap = emptyHandCap        -- use same cap that made canEmptyWithWilds true
+  elseif hasFoot and not otherFoot then
+    phase1Cap = 2                   -- regular foot-pickup play (non-emptying)
+  else
+    phase1Cap = math.huge
+  end
   if phase1Allowed then
     local eligiblePairs = {}
     for rank, count in pairs(state.handByRank) do
@@ -728,59 +793,65 @@ function evalWildAllocations(state, meldPlan)
         if card.rank == rank then table.insert(naturalCards, card) end
       end
       melds[rank] = {rank=rank, obj=nil, total=2, wilds=0, isNew=true, isWildMeld=false, naturals=naturalCards}
-      local label = (hasFoot and not otherFoot)
-        and string.format("new meld: 2 × %s + 1 wild (foot-pickup play, %d/2)", rank, phase1Count+1)
-        or  string.format("new meld: 2 × %s + 1 wild (hand pair)", rank)
+      local label = canEmptyViaWildMeld
+        and string.format("new meld: 2 × %s + 1 wild (wild+pair empty hand)", rank)
+        or  (hasFoot and not otherFoot)
+          and string.format("new meld: 2 × %s + 1 wild (foot-pickup play, %d/2)", rank, phase1Count+1)
+          or  string.format("new meld: 2 × %s + 1 wild (hand pair)", rank)
       assignWild(rank, 1, label)
       phase1Count = phase1Count + 1
     end
   end
 
-  -- Phase 2: pre-existing melds on table (obj ~= nil) → 1 wild each.
-  -- Wild melds: always extend (preferred destination when hasFoot).
-  -- Rank melds: only when player has no foot (going out scenario) OR the wild completes the book.
-  -- When needBlackBook, rank melds only qualify when wild would bring total to >= 7.
-  do
-    local preExisting = {}
-    for rank, m in pairs(melds) do
-      if m.obj ~= nil and canExtend(m) then
-        local eligible = not needBlackBook or m.isWildMeld or (m.total + 1 >= 7)
-        if eligible then table.insert(preExisting, rank) end
+  -- Phases 2 and 3 are skipped when emptying the hand (canEmptyViaWildMeld or
+  -- canEmptyWithWilds) so remaining wilds flow directly to the Phase 4 wild meld.
+  if not canEmptyViaWildMeld and not canEmptyWithWilds then
+    -- Phase 2: pre-existing melds on table (obj ~= nil) → 1 wild each.
+    -- Wild melds: always extend (preferred destination when hasFoot).
+    -- Rank melds: only when player has no foot (going out scenario) OR the wild completes the book.
+    -- When needBlackBook, rank melds only qualify when wild would bring total to >= 7.
+    do
+      local preExisting = {}
+      for rank, m in pairs(melds) do
+        if m.obj ~= nil and canExtend(m) then
+          local eligible = not needBlackBook or m.isWildMeld or (m.total + 1 >= 7)
+          if eligible then table.insert(preExisting, rank) end
+        end
+      end
+      for _, rank in ipairs(preExisting) do
+        if nextWild > #wildCards then break end
+        local m = melds[rank]
+        local label = m.isWildMeld
+          and string.format("extends wild meld (%d cards on table)", m.total)
+          or  string.format("extends own meld %s (%d cards on table)", rank, m.total)
+        assignWild(rank, 2, label)
       end
     end
-    for _, rank in ipairs(preExisting) do
-      if nextWild > #wildCards then break end
-      local m = melds[rank]
-      local label = m.isWildMeld
-        and string.format("extends wild meld (%d cards on table)", m.total)
-        or  string.format("extends own meld %s (%d cards on table)", rank, m.total)
-      assignWild(rank, 2, label)
-    end
-  end
 
-  -- Phase 3: remaining wilds → fewest-cards-first.
-  -- Wild melds always eligible; rank melds only when player has no foot (via canExtend).
-  -- When needBlackBook, rank melds only qualify when wild would bring total to >= 7.
-  while nextWild <= #wildCards do
-    local candidates = {}
-    for _, m in pairs(melds) do
-      if canExtend(m) then
-        local eligible = not needBlackBook or m.isWildMeld or (m.total + 1 >= 7)
-        if eligible then table.insert(candidates, m) end
+    -- Phase 3: remaining wilds → fewest-cards-first.
+    -- Wild melds always eligible; rank melds only when player has no foot (via canExtend).
+    -- When needBlackBook, rank melds only qualify when wild would bring total to >= 7.
+    while nextWild <= #wildCards do
+      local candidates = {}
+      for _, m in pairs(melds) do
+        if canExtend(m) then
+          local eligible = not needBlackBook or m.isWildMeld or (m.total + 1 >= 7)
+          if eligible then table.insert(candidates, m) end
+        end
       end
-    end
-    if #candidates == 0 then break end
-    table.sort(candidates, function(a, b) return a.total < b.total end)
-    local placed = false
-    for _, m in ipairs(candidates) do
-      if canExtend(m) then  -- re-check: assignWild may have updated m.wilds/m.total
-        placed = assignWild(m.rank, 3,
-          string.format("extends %s (%d cards, fewest-first)",
-            m.isWildMeld and "wild meld" or ("meld "..m.rank), m.total))
-        if placed then break end
+      if #candidates == 0 then break end
+      table.sort(candidates, function(a, b) return a.total < b.total end)
+      local placed = false
+      for _, m in ipairs(candidates) do
+        if canExtend(m) then  -- re-check: assignWild may have updated m.wilds/m.total
+          placed = assignWild(m.rank, 3,
+            string.format("extends %s (%d cards, fewest-first)",
+              m.isWildMeld and "wild meld" or ("meld "..m.rank), m.total))
+          if placed then break end
+        end
       end
+      if not placed then break end
     end
-    if not placed then break end
   end
 
   -- Phase 4: if 3+ wilds still unallocated and no wild meld exists on the table,
@@ -910,6 +981,48 @@ function buildTurnPlan(sColor)
     else
       for _, wa in ipairs(wildAllocs) do
         L(string.format("  [w%d] %s — %s", wa.priority, wa.rank, wa.reason))
+      end
+    end
+  end
+
+  -- Ensure at least 2 cards remain when the player cannot go out and is not
+  -- intentionally emptying their hand to pick up their foot.
+  -- (1 card to keep + 1 card to discard.)  Prune wild allocs first, then
+  -- non-book-completing melds (priority >= 3, i.e. extend or new meld).
+  if not goOut.should and not (state.hasFoot and allowWilds) then
+    local consumed = 0
+    for _, m  in ipairs(melds)      do consumed = consumed + m.count                    end
+    for _, wa in ipairs(wildAllocs) do consumed = consumed + #wa.wilds + #wa.naturalCards end
+    local proj2 = state.handCount - consumed
+    if proj2 < 2 then
+      -- Step 1: prune wild allocs (highest priority number = least important first)
+      if #wildAllocs > 0 then
+        table.sort(wildAllocs, function(a, b) return a.priority > b.priority end)
+        local i = 1
+        while proj2 < 2 and i <= #wildAllocs do
+          local wa = wildAllocs[i]
+          proj2 = proj2 + #wa.wilds + #wa.naturalCards
+          L(string.format("Wild alloc pruned (hand too small): %s", wa.rank))
+          table.remove(wildAllocs, i)
+        end
+      end
+      -- Step 2: prune non-book-completing melds (p3 / p4) if still short
+      if proj2 < 2 then
+        table.sort(melds, function(a, b) return a.priority > b.priority end)
+        local pruned = {}
+        local i = 1
+        while proj2 < 2 and i <= #melds do
+          if melds[i].priority >= 3 then
+            proj2 = proj2 + melds[i].count
+            table.insert(pruned, melds[i].rank)
+            table.remove(melds, i)
+          else
+            i = i + 1
+          end
+        end
+        if #pruned > 0 then
+          L("Melds pruned (cannot go out, hand too small): " .. table.concat(pruned, ", "))
+        end
       end
     end
   end
