@@ -4042,6 +4042,22 @@ function getMelds(sColor)
   if not colorZones then return result end
   local seen = {}
 
+  -- Build a set of GUIDs for cards currently held in any player's hand zone.
+  -- Hand cards are never on-table melds and must be excluded from all scans.
+  local handGuids = {}
+  pcall(function()
+    for _, color in ipairs(playerList or {}) do
+      local p = Player[color]
+      if p and p.seated then
+        pcall(function()
+          for _, obj in ipairs(p.getHandObjects()) do
+            handGuids[obj.getGUID()] = true
+          end
+        end)
+      end
+    end
+  end)
+
   -- Determine which axis is the lateral (spread) axis for this player.
   local rotY        = getPlayerRotY(sColor)
   local decode      = gt_DECODE_DIR[rotY]
@@ -4049,50 +4065,76 @@ function getMelds(sColor)
 
   -- Collect objects in two buckets: confirmed meld entries, and wild Cards to check.
   -- Wild Card objects (rank "2" or "Joker") that are physically within a natural rank
-  -- meld's spread are embedded wilds — they must NOT appear as separate meld entries
-  -- (they are already counted by getMeldInfo's proximity scan).
+  -- meld's spread are embedded wilds — they must NOT appear as separate meld entries.
   local wildCardsPending = {}
   local naturalCardLats  = {}   -- lateral positions of all non-wild Card entries
 
+  -- Process a single TTS object (Card or Deck) into result/pending buckets.
+  local function processObj(obj)
+    if obj.is_face_down then return end
+    local guid = obj.getGUID()
+    if seen[guid] then return end
+    if handGuids[guid] then return end   -- skip cards held in any player's hand
+    seen[guid] = true
+    local rank, pos
+    local isBook = false
+    if obj.tag == "Card" then
+      local _, r = cardDeets(obj)
+      rank = r
+      pos  = obj.getPosition()
+    elseif obj.tag == "Deck" then
+      local ok_d, cards = pcall(function() return obj.getObjects() end)
+      if ok_d and cards and #cards > 0 then
+        local _, r = cardDeets(cards[1])
+        rank = r
+      end
+      local ok_q, qty = pcall(function() return obj.getQuantity() end)
+      if ok_q and qty and qty >= 7 then isBook = true end
+      pos = obj.getPosition()
+    end
+    if rank then
+      local isWildRank = (rank == "2" or rank == "Joker")
+      if isWildRank and obj.tag == "Card" and pos then
+        table.insert(wildCardsPending, {rank=rank, obj=obj, pos=pos})
+      else
+        table.insert(result, {rank=rank, isBook=isBook, obj=obj, pos=pos})
+        if not isWildRank and obj.tag == "Card" and pos then
+          table.insert(naturalCardLats, pos[lateralAxis])
+        end
+      end
+    end
+  end
+
+  -- Primary scan: objects reported by each score zone.
   for _, scoreZone in ipairs(colorZones.zones) do
     local ok, objs = pcall(function() return scoreZone.obj.getObjects() end)
     if ok and objs then
       for _, obj in ipairs(objs) do
-        pcall(function()
-          if obj.is_face_down then return end
-          local guid = obj.getGUID()
-          if seen[guid] then return end
-          seen[guid] = true
-          local rank, pos
-          local isBook = false
-          if obj.tag == "Card" then
-            local _, r, _ = cardDeets(obj)
-            rank = r
-            pos  = obj.getPosition()
-          elseif obj.tag == "Deck" then
-            local ok_d, cards = pcall(function() return obj.getObjects() end)
-            if ok_d and cards and #cards > 0 then
-              local _, r, _ = cardDeets(cards[1])
-              rank = r
-            end
-            local ok_q, qty = pcall(function() return obj.getQuantity() end)
-            if ok_q and qty and qty >= 7 then isBook = true end
-            pos = obj.getPosition()
-          end
-          if rank then
-            local isWildRank = (rank == "2" or rank == "Joker")
-            if isWildRank and obj.tag == "Card" and pos then
-              -- Defer: decide after we know all natural card positions.
-              table.insert(wildCardsPending, {rank=rank, obj=obj, pos=pos})
-            else
-              table.insert(result, {rank=rank, isBook=isBook, obj=obj, pos=pos})
-              if not isWildRank and obj.tag == "Card" and pos then
-                table.insert(naturalCardLats, pos[lateralAxis])
-              end
-            end
-          end
-        end)
+        pcall(function() processObj(obj) end)
       end
+    end
+  end
+
+  -- Supplemental scan: find cards that drifted outside zone boundaries.
+  -- Build a bounding box from the union of all zone regions (with a small margin).
+  local function tV(t, ni, sk) return (t[ni] or t[sk] or 0) end
+  local xMin, xMax, zMin, zMax = math.huge, -math.huge, math.huge, -math.huge
+  for _, sz in ipairs(colorZones.zones) do
+    local cx = tV(sz.pos, 1, "x");  local hx = tV(sz.scl, 1, "x") / 2
+    local cz = tV(sz.pos, 3, "z");  local hz = tV(sz.scl, 3, "z") / 2
+    if hx > 0 and hz > 0 then
+      xMin = math.min(xMin, cx - hx - 2);  xMax = math.max(xMax, cx + hx + 2)
+      zMin = math.min(zMin, cz - hz - 2);  zMax = math.max(zMax, cz + hz + 2)
+    end
+  end
+  if xMin < math.huge then
+    for _, obj in ipairs(getObjects()) do
+      pcall(function()
+        if obj.tag ~= "Card" and obj.tag ~= "Deck" then return end
+        local p = obj.getPosition()
+        if p.x < xMin or p.x > xMax or p.z < zMin or p.z > zMax then return end
+        processObj(obj)
+      end)
     end
   end
 
@@ -4102,10 +4144,7 @@ function getMelds(sColor)
     local lat = wc.pos[lateralAxis]
     local embedded = false
     for _, natLat in ipairs(naturalCardLats) do
-      if math.abs(lat - natLat) < 0.75 then
-        embedded = true
-        break
-      end
+      if math.abs(lat - natLat) < 0.75 then embedded = true; break end
     end
     if not embedded then
       table.insert(result, {rank=wc.rank, isBook=false, obj=wc.obj, pos=wc.pos})
@@ -4216,9 +4255,11 @@ function classifyBook(deckObj)
   if not ok or not qty or qty < 7 then return nil end
   local ok2, cards = pcall(function() return deckObj.getObjects() end)
   if not ok2 or not cards then return nil end
-  local wildCount = 0
-  local rankFound = nil
-  local mixed     = false
+  local wildCount  = 0
+  local rankFound  = nil
+  local mixed      = false
+  local hasRed     = false
+  local hasBlack   = false
   for _, c in ipairs(cards) do
     local ok3, clr, rank = pcall(function()
       local cl, rk, _ = cardDeets(c)
@@ -4230,11 +4271,15 @@ function classifyBook(deckObj)
       else
         if rankFound and rank ~= rankFound then mixed = true end
         rankFound = rankFound or rank
+        if clr == "Red"   then hasRed   = true end
+        if clr == "Black" then hasBlack = true end
       end
     end
   end
   if mixed then return nil end
   if wildCount == qty then return "wild" end
+  -- Color-balance rule: rank books require ≥1 red-suit and ≥1 black-suit natural card.
+  if not (hasRed and hasBlack) then return nil end
   if wildCount > 0 then return "black" end
   return "red"
 end
@@ -4253,8 +4298,9 @@ end
 -- True when the player already has at least one eligible meld or any book on the table.
 local function hasExistingMeldsOrBooks(state)
   if #state.books.red + #state.books.black + #state.books.wild > 0 then return true end
-  for rank in pairs(state.meldsByRank) do
-    if isEligibleRank(rank) then return true end
+  -- A valid meld requires >=3 cards; a single stray card in the zone does not count.
+  for rank, meld in pairs(state.meldsByRank) do
+    if isEligibleRank(rank) and (meld.count or 1) >= 3 then return true end
   end
   return false
 end
@@ -4286,6 +4332,33 @@ local function countMeldWilds(obj)
   return count
 end
 
+-- Returns {hasRed=bool, hasBlack=bool} indicating whether an existing meld
+-- (Card or Deck TTS object) contains at least one red-suit and one black-suit
+-- natural card.  Wild cards (2s/Jokers) are not counted toward either color.
+local function getMeldColors(obj)
+  local hasRed, hasBlack = false, false
+  if not obj then return {hasRed=false, hasBlack=false} end
+  pcall(function()
+    if obj.tag == "Card" then
+      local cl = cardDeets(obj)
+      if cl == "Red"   then hasRed   = true
+      elseif cl == "Black" then hasBlack = true end
+    elseif obj.tag == "Deck" then
+      local ok, cards = pcall(function() return obj.getObjects() end)
+      if ok and cards then
+        for _, c in ipairs(cards) do
+          pcall(function()
+            local cl, _, _ = cardDeets(c)
+            if cl == "Red"   then hasRed   = true
+            elseif cl == "Black" then hasBlack = true end
+          end)
+        end
+      end
+    end
+  end)
+  return {hasRed=hasRed, hasBlack=hasBlack}
+end
+
 -- Returns a plain-data snapshot of sColor's game state.
 -- Fields: color, hand, handCount, handByRank, wildCount, melds, meldsByRank,
 --         books {red,black,wild}, bookCounts {red,black,wild}, hasFoot, canGoOut
@@ -4311,11 +4384,16 @@ function snapshotState(sColor)
         if not meldsByRank[meld.rank] then
           -- First object of this rank: store it with the computed count.
           meldsByRank[meld.rank] = {rank=meld.rank, obj=meld.obj, count=objCount,
-                                    isBook=false, pos=meld.pos}
+                                    isBook=false, pos=meld.pos, colors={hasRed=false, hasBlack=false}}
         else
           -- Additional spread Card objects of the same rank: accumulate count.
           meldsByRank[meld.rank].count = meldsByRank[meld.rank].count + objCount
         end
+        -- Accumulate color balance from ALL objects of this rank (handles spread cards
+        -- where each card is a separate TTS object and no single obj shows both colors).
+        local mc = getMeldColors(meld.obj)
+        if mc.hasRed   then meldsByRank[meld.rank].colors.hasRed   = true end
+        if mc.hasBlack then meldsByRank[meld.rank].colors.hasBlack = true end
       end
     end
   end
@@ -4416,10 +4494,29 @@ function evalMeldsToPlay(state)
         local priority, reason, meldColor
         local skip = false
 
+        -- Pre-compute projected color balance (existing meld naturals + hand cards of this rank).
+        -- Use colors accumulated across ALL spread objects of this rank (set in snapshotState).
+        local existingColors = existing and (existing.colors or getMeldColors(existing.obj)) or {hasRed=false, hasBlack=false}
+        local projHasRed  = existingColors.hasRed
+        local projHasBlack = existingColors.hasBlack
+        for _, hc in ipairs(state.hand) do
+          if hc.rank == rank then
+            if hc.color == "Red"   then projHasRed   = true end
+            if hc.color == "Black" then projHasBlack = true end
+          end
+        end
+        local projColorBalanced = projHasRed and projHasBlack
+
         if existing and existingCount < 7 and projected >= 7 then
           local existingWilds = countMeldWilds(existing.obj)
           local isRedBook = (existingWilds == 0)
-          if isRedBook and not state.hasFoot
+          if not projColorBalanced then
+            -- Would reach 7 cards but natural cards lack both colors — not a book yet.
+            meldColor = (existingWilds > 0) and "black" or "red"
+            priority  = 3
+            reason = string.format("extends %s to %d (needs both colors to book)",
+              meldColor .. " meld", projected)
+          elseif isRedBook and not state.hasFoot
               and state.bookCounts.red > 1 and state.bookCounts.black < 2 then
             -- Suppress: foot picked up, already have 2+ red books but < 2 black.
             -- Hold this rank back so a wild can complete it as a black book.
@@ -4437,7 +4534,20 @@ function evalMeldsToPlay(state)
           -- Extending a completed book is fine — that book is already counted.
           if not existing.isBook and existingWilds == 0 and not state.hasFoot
              and state.bookCounts.red >= 2 and state.bookCounts.black < 2 then
-            skip = true
+            -- Normally suppress: would build toward a 3rd red book instead of 2nd black.
+            -- Exception: if naturals + available wilds reach 7, this CAN become a black book.
+            local wildsAvail = math.min(state.wildCount, 2 - existingWilds)
+            if existingCount + count + wildsAvail >= 7 and projColorBalanced then
+              priority  = 2   -- completes black book (via wilds)
+              meldColor = "red"  -- currently red; display will show -> Black Book
+              reason = string.format("completes black book with wilds: %d + %d + %d = 7",
+                existingCount, count, wildsAvail)
+            else
+              -- Can't complete a book this turn — but still extend the meld (don't skip).
+              priority = 3
+              reason = string.format("extends red meld: %d on table + %d from hand (black book later)",
+                existingCount, count)
+            end
           else
             priority = 3
             local target = existing.isBook and (meldColor .. " book") or (meldColor .. " meld")
@@ -4828,17 +4938,31 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
       local tot, wlds = getMeldInfo(rank)
       -- rank "2" or "Joker" means a pure wild meld — no 2-wild cap applies.
       local isWildMeld = (rank == "2" or rank == "Joker")
+      -- Use colors accumulated across all spread objects (set in snapshotState).
+      local colors = isWildMeld and {hasRed=false, hasBlack=false} or (meld.colors or getMeldColors(meld.obj))
       melds[rank] = {rank=rank, obj=meld.obj, total=tot, wilds=wlds,
-                     isNew=false, isWildMeld=isWildMeld, naturals={}}
+                     isNew=false, isWildMeld=isWildMeld, naturals={}, colors=colors}
     end
   end
   for _, m in ipairs(meldPlan) do
     if isEligibleRank(m.rank) and not redBookRanks[m.rank] then
       if melds[m.rank] then
+        -- Merge in color info from the incoming hand cards.
+        local mc = melds[m.rank].colors
+        for _, hc in ipairs(m.cards or {}) do
+          if hc.color == "Red"   then mc.hasRed   = true end
+          if hc.color == "Black" then mc.hasBlack = true end
+        end
         melds[m.rank].total = melds[m.rank].total + m.count
       else
+        -- New meld: compute colors from the hand cards being played.
+        local mc = {hasRed=false, hasBlack=false}
+        for _, hc in ipairs(m.cards or {}) do
+          if hc.color == "Red"   then mc.hasRed   = true end
+          if hc.color == "Black" then mc.hasBlack = true end
+        end
         melds[m.rank] = {rank=m.rank, obj=nil, total=m.count, wilds=0,
-                         isNew=true, isWildMeld=false, naturals=m.cards or {}}
+                         isNew=true, isWildMeld=false, naturals=m.cards or {}, colors=mc}
       end
     end
   end
@@ -4952,7 +5076,10 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     if not m.isWildMeld and m.wilds >= 2 then return false end
     m.total = m.total + 1
     m.wilds = m.wilds + 1
-    local completesBook = (m.total >= 7)
+    -- A rank meld becomes a book only if it also has ≥1 red-suit and ≥1 black-suit natural card.
+    local mc = m.colors or {hasRed=false, hasBlack=false}
+    local colorBalanced = m.isWildMeld or (mc.hasRed and mc.hasBlack)
+    local completesBook = (m.total >= 7) and colorBalanced
     -- Merge into existing alloc when this is a follow-on wild for a Phase 1 new meld.
     if not m.isWildMeld and m.obj == nil and not m.isNew then
       for i = #allocs, 1, -1 do
@@ -5058,25 +5185,56 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
   -- Phases 2 and 3 are skipped when emptying the hand (canEmptyViaWildMeld or
   -- canEmptyWithWilds) so remaining wilds flow directly to the Phase 4 wild meld.
   if not canEmptyViaWildMeld and not canEmptyWithWilds then
-    -- Phase 2: pre-existing melds on table (obj ~= nil) → 1 wild each.
-    -- Wild melds: always extend (preferred destination when hasFoot).
-    -- Rank melds: only when player has no foot (going out scenario) OR the wild completes the book.
-    -- When needBlackBook, rank melds only qualify when wild would bring total to >= 7.
+    -- Phase 2: pre-existing melds on table (obj ~= nil).
+    -- Normal (not needBlackBook): 1 wild each.
+    -- needBlackBook: concentrate all wilds needed to COMPLETE one meld at a time (sorted
+    --   by fewest-additional-wilds first), re-checking eligibility with remaining wilds.
     do
       local preExisting = {}
       for rank, m in pairs(melds) do
         if m.obj ~= nil and canExtend(m) then
-          local eligible = not needBlackBook or m.isWildMeld or (m.total + 1 >= 7)
+          local wildsLeft = #wildCards - nextWild + 1
+          local mc2 = m.colors or {hasRed=false, hasBlack=false}
+          local colorOk = mc2.hasRed and mc2.hasBlack
+          -- When needBlackBook, wild melds do not count as black books — exclude them.
+          local eligible = not needBlackBook
+                        or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)
           if eligible then table.insert(preExisting, rank) end
         end
       end
-      for _, rank in ipairs(preExisting) do
-        if nextWild > #wildCards then break end
-        local m = melds[rank]
-        local label = m.isWildMeld
-          and string.format("extends wild meld (%d cards on table)", m.total)
-          or  string.format("extends black meld %s (%d cards on table)", rank, m.total)
-        assignWild(rank, 2, label)
+      if needBlackBook then
+        -- Sort: fewest additional wilds needed to complete a book first (closest to 7).
+        table.sort(preExisting, function(a, b)
+          local ma, mb = melds[a], melds[b]
+          local na = 7 - ma.total   -- additional wilds needed to reach 7
+          local nb = 7 - mb.total
+          if na ~= nb then return na < nb end
+          return ma.total > mb.total  -- tiebreak: more existing cards first
+        end)
+        for _, rank in ipairs(preExisting) do
+          if nextWild > #wildCards then break end
+          local m = melds[rank]
+          -- Re-check with remaining wilds: still reachable?
+          local wildsLeft = #wildCards - nextWild + 1
+          local mc2 = m.colors or {hasRed=false, hasBlack=false}
+          local colorOk = mc2.hasRed and mc2.hasBlack
+          if not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk then
+            -- Assign all wilds needed to complete this meld to a book.
+            while nextWild <= #wildCards and canExtend(m) and m.total < 7 do
+              assignWild(rank, 2,
+                string.format("completes black book %s (%d → 7)", rank, m.total))
+            end
+          end
+        end
+      else
+        for _, rank in ipairs(preExisting) do
+          if nextWild > #wildCards then break end
+          local m = melds[rank]
+          local label = m.isWildMeld
+            and string.format("extends wild meld (%d cards on table)", m.total)
+            or  string.format("extends black meld %s (%d cards on table)", rank, m.total)
+          assignWild(rank, 2, label)
+        end
       end
     end
 
@@ -5095,12 +5253,17 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
 
     -- Phase 3: remaining wilds → fewest-cards-first.
     -- Wild melds always eligible; rank melds only when player has no foot (via canExtend).
-    -- When needBlackBook, rank melds only qualify when wild would bring total to >= 7.
+    -- When needBlackBook, rank melds qualify when available wilds can still complete them.
     while nextWild <= #wildCards do
       local candidates = {}
       for _, m in pairs(melds) do
         if canExtend(m) then
-          local eligible = not needBlackBook or m.isWildMeld or (m.total + 1 >= 7)
+          local wildsLeft = #wildCards - nextWild + 1
+          local mc2 = m.colors or {hasRed=false, hasBlack=false}
+          local colorOk = mc2.hasRed and mc2.hasBlack
+          -- When needBlackBook, wild melds do not count as black books — exclude them.
+          local eligible = not needBlackBook
+                        or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)
           if eligible then table.insert(candidates, m) end
         end
       end
@@ -5326,7 +5489,12 @@ function buildTurnPlan(sColor)
       end
       -- Step 2: prune non-book-completing melds (p3 / p4) if still short
       if proj2 < 2 then
-        table.sort(melds, function(a, b) return a.priority > b.priority end)
+        -- Prune fewest-card plays first (keep high-count plays that score more points).
+        -- Use priority as tiebreaker: remove lower-importance plays first.
+        table.sort(melds, function(a, b)
+          if a.count ~= b.count then return a.count < b.count end
+          return a.priority > b.priority
+        end)
         local pruned = {}
         local i = 1
         while proj2 < 2 and i <= #melds do
@@ -5355,7 +5523,7 @@ function buildTurnPlan(sColor)
   end
 
   local discard
-  if goOut.should then
+  if goOut.should and projHandCount == 0 then
     discard = {card=nil, reason="going out — no discard needed"}
   else
     discard = evalDiscard(state, melds, wildAllocs)
@@ -5485,8 +5653,12 @@ function buildTurnPlan(sColor)
   -- still on the table.  executor uses this to auto-deal foot → sort → re-plan.
   local picksUpFoot = state.hasFoot and (projHandCount == 0)
 
-  if goOut.should then
+  if goOut.should and not discard.card then
     L("  DISC  (going out — no discard)")
+  elseif goOut.should and discard.card then
+    local r = discard.card.rank
+    local s = discard.card.suit or "?"
+    L(string.format("  DISC  %s of %s (going out)", r, s))
   elseif picksUpFoot then
     L("  DISC  (none — hand empty, picking up foot)")
   elseif discard.card then
@@ -5650,7 +5822,7 @@ function executeTurnPlan(plan)
 
   -- Discard fires after all melds and wild plays have finished.
   -- Skipped when going out (no discard needed) or when the hand is empty for foot pickup.
-  if plan.discard.card and not plan.goOut.should and not plan.picksUpFoot then
+  if plan.discard.card and not plan.picksUpFoot then
     Wait.time(function()
       pcall(function()
         UI.setAttribute("btnDiscard", "text", "Discard")
