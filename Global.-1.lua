@@ -674,7 +674,7 @@ function buildStateContext(plan)
     if not meld.isBook and meld.rank ~= "3" then
       local rank = meld.rank
       if not meldByRank[rank] then
-        meldByRank[rank] = {qty=0, wildCt=0}
+        meldByRank[rank] = {qty=0, wildCt=0, positions={}}
         table.insert(meldRankOrder, rank)
       end
       pcall(function()
@@ -682,12 +682,16 @@ function buildStateContext(plan)
           meldByRank[rank].qty = meldByRank[rank].qty + 1
           local cl = cardDeets(meld.obj)
           if cl == "Wild" then meldByRank[rank].wildCt = meldByRank[rank].wildCt + 1 end
+          local p = meld.obj.getPosition()
+          table.insert(meldByRank[rank].positions, string.format("(%.1f,%.1f)", p.x, p.z))
         elseif meld.obj.tag == "Deck" then
           meldByRank[rank].qty = meldByRank[rank].qty + meld.obj.getQuantity()
           for _, c in ipairs(meld.obj.getObjects()) do
             local nm = c.description and string.match(c.description, "^([%a%d]+)") or ""
             if nm == "2" or nm == "Joker" then meldByRank[rank].wildCt = meldByRank[rank].wildCt + 1 end
           end
+          local p = meld.obj.getPosition()
+          table.insert(meldByRank[rank].positions, string.format("deck(%.1f,%.1f)", p.x, p.z))
         end
       end)
     end
@@ -696,7 +700,8 @@ function buildStateContext(plan)
   for _, rank in ipairs(meldRankOrder) do
     local info = meldByRank[rank]
     local rk = _SC_RANK[rank] or rank
-    table.insert(meldParts, rk .. "×" .. info.qty .. (info.wildCt > 0 and ("(" .. info.wildCt .. "w)") or ""))
+    local posStr = #info.positions > 0 and (" @" .. table.concat(info.positions, ",")) or ""
+    table.insert(meldParts, rk .. "×" .. info.qty .. (info.wildCt > 0 and ("(" .. info.wildCt .. "w)") or "") .. posStr)
   end
   L("melds: " .. (#meldParts > 0 and table.concat(meldParts, " ") or "(none)"))
 
@@ -4042,8 +4047,9 @@ function getMelds(sColor)
   if not colorZones then return result end
   local seen = {}
 
-  -- Build a set of GUIDs for cards currently held in any player's hand zone.
-  -- Hand cards are never on-table melds and must be excluded from all scans.
+  -- Build a set of GUIDs to exclude from meld scanning:
+  -- hand cards (never on-table melds) and discard-pile cards (top card is face-up
+  -- and would otherwise be mistaken for a 1-card meld by the supplemental scan).
   local handGuids = {}
   pcall(function()
     for _, color in ipairs(playerList or {}) do
@@ -4054,6 +4060,14 @@ function getMelds(sColor)
             handGuids[obj.getGUID()] = true
           end
         end)
+      end
+    end
+  end)
+  -- Exclude every object in the discard zone (face-up top card looks like a meld).
+  pcall(function()
+    if obj_Zone_Discard then
+      for _, obj in ipairs(obj_Zone_Discard.getObjects()) do
+        pcall(function() handGuids[obj.getGUID()] = true end)
       end
     end
   end)
@@ -4085,8 +4099,25 @@ function getMelds(sColor)
     elseif obj.tag == "Deck" then
       local ok_d, cards = pcall(function() return obj.getObjects() end)
       if ok_d and cards and #cards > 0 then
-        local _, r = cardDeets(cards[1])
-        rank = r
+        -- Determine natural rank: first non-wild card (handles decks with wild substitutes).
+        local natRank
+        for _, c in ipairs(cards) do
+          local _, cr = cardDeets(c)
+          if cr ~= "2" and cr ~= "Joker" then natRank = cr; break end
+        end
+        if not natRank then
+          local _, cr = cardDeets(cards[1]); natRank = cr  -- pure wild deck
+        end
+        -- Require homogeneity: all cards must be natRank or wild.
+        -- Guards against the discard pile being misread as a meld by its top card's rank.
+        local homogeneous = true
+        for _, c in ipairs(cards) do
+          local _, cr = cardDeets(c)
+          if cr ~= natRank and cr ~= "2" and cr ~= "Joker" then
+            homogeneous = false; break
+          end
+        end
+        if homogeneous then rank = natRank end
       end
       local ok_q, qty = pcall(function() return obj.getQuantity() end)
       if ok_q and qty and qty >= 7 then isBook = true end
@@ -4461,7 +4492,7 @@ function evalMeldsToPlay(state)
 
   local existingByRank = {}
   for rank, meld in pairs(state.meldsByRank) do
-    existingByRank[rank] = {obj=meld.obj, count=meld.count or safeQty(meld.obj, 1), isBook=false}
+    existingByRank[rank] = {obj=meld.obj, count=meld.count or safeQty(meld.obj, 1), isBook=false, colors=meld.colors}
   end
   for _, bookList in pairs(state.books) do
     for _, book in ipairs(bookList) do
@@ -4469,6 +4500,13 @@ function evalMeldsToPlay(state)
         existingByRank[book.rank] = {obj=book.obj, count=safeQty(book.obj, 7), isBook=true}
       end
     end
+  end
+
+  -- Count open melds that are exactly 6 cards — each is "1 wild away from a black book."
+  -- Used below to allow an extra red book when enough near-black candidates remain.
+  local nearBlackCount = 0
+  for rank, meld in pairs(state.meldsByRank) do
+    if meld.count == 6 then nearBlackCount = nearBlackCount + 1 end
   end
 
   -- Priority tiers:
@@ -4518,9 +4556,22 @@ function evalMeldsToPlay(state)
               meldColor .. " meld", projected)
           elseif isRedBook and not state.hasFoot
               and state.bookCounts.red > 1 and state.bookCounts.black < 2 then
-            -- Suppress: foot picked up, already have 2+ red books but < 2 black.
-            -- Hold this rank back so a wild can complete it as a black book.
-            skip = true
+            -- Default: suppress making another red book while still needing black books.
+            -- Exception: if this meld is currently a 6-card near-black candidate, allow
+            -- the red book only when enough OTHER near-black melds remain to cover the
+            -- remaining black-book requirement.
+            local blackBooksNeeded = 2 - state.bookCounts.black
+            local thisIsNearBlack  = (existingCount == 6)
+            local remainNearBlack  = nearBlackCount - (thisIsNearBlack and 1 or 0)
+            if thisIsNearBlack and remainNearBlack >= blackBooksNeeded then
+              priority  = 1
+              meldColor = "red"
+              reason = string.format(
+                "completes red book: %d + %d = 7 (ok: %d near-black remain ≥ %d needed)",
+                existingCount, count, remainNearBlack, blackBooksNeeded)
+            else
+              skip = true
+            end
           else
             priority  = isRedBook and 1 or 2
             meldColor = isRedBook and "red" or "black"
@@ -4565,10 +4616,18 @@ function evalMeldsToPlay(state)
           for _, card in ipairs(state.hand) do
             if card.rank == rank then table.insert(cards, card) end
           end
+          -- For book-completing plays (p1/p2) with an existing meld, only play the
+          -- minimum cards needed to reach 7.  Excess cards stay in hand for discard.
+          local playCount = count
+          if priority <= 2 and existingCount > 0 and projected > 7 then
+            playCount = 7 - existingCount
+          end
+          local partial = (playCount < count)
           table.insert(plans, {
-            rank=rank, cards=cards, count=count,
+            rank=rank, cards=cards, count=playCount,
             existingCount=existingCount, priority=priority,
             meldColor=meldColor, reason=reason,
+            partial=partial,
           })
         end
       end
@@ -4589,7 +4648,9 @@ function evalMeldsToPlay(state)
     local totalPts = 0
     for _, plan in ipairs(plans) do
       for _, card in ipairs(plan.cards) do
-        totalPts = totalPts + scoreCard(card.obj)
+        if card.rank ~= "3" then   -- red 3s never count toward opening minimum
+          totalPts = totalPts + scoreCard(card.obj)
+        end
       end
     end
     if totalPts < minimum then
@@ -4632,8 +4693,13 @@ local gt_RANK_WITHIN_STRATA = {
 -- wildAllocs is optional — the list from evalWildAllocations.
 -- Cards consumed by wild allocs are excluded from discard candidates.
 function evalDiscard(state, meldPlan, wildAllocs)
-  local melding = {}
-  for _, m in ipairs(meldPlan) do melding[m.rank] = true end
+  -- Count how many cards of each rank the meld plan consumes.
+  -- Partial melds (m.count < all of that rank) must only exclude m.count cards,
+  -- leaving the excess available as discard candidates.
+  local meldingCount = {}
+  for _, m in ipairs(meldPlan) do
+    meldingCount[m.rank] = (meldingCount[m.rank] or 0) + m.count
+  end
 
   -- Track specific card objects consumed by wild allocations (keyed by TTS obj ref).
   local playedObjs = {}
@@ -4645,8 +4711,13 @@ function evalDiscard(state, meldPlan, wildAllocs)
   end
 
   local remaining = {}
+  local rankUsed = {}   -- how many cards of each rank have been consumed by melds so far
   for _, card in ipairs(state.hand) do
-    if not melding[card.rank] and not playedObjs[card.obj] then
+    local needed = meldingCount[card.rank] or 0
+    local used   = rankUsed[card.rank] or 0
+    if used < needed then
+      rankUsed[card.rank] = used + 1   -- consume this card for the meld, skip it
+    elseif not playedObjs[card.obj] then
       table.insert(remaining, card)
     end
   end
@@ -4767,43 +4838,38 @@ function evalDiscard(state, meldPlan, wildAllocs)
     local groups = {}
     for _, g in pairs(byRank) do table.insert(groups, g) end
 
-    -- RULE 3: Minimum count.
-    local minCount = math.huge
-    for _, g in ipairs(groups) do
-      if #g.cards < minCount then minCount = #g.cards end
-    end
-    local atMinCount = {}
-    for _, g in ipairs(groups) do
-      if #g.cards == minCount then table.insert(atMinCount, g) end
-    end
-
-    -- RULE 4: Lowest strata.
+    -- RULE 4: Strata is the primary filter — lowest strata discarded first.
+    -- Aces (strata 3) are always held over 8–K (strata 2) and 4–7 (strata 1),
+    -- even if the Ace is a singleton.  Wilds are handled separately (fallback only).
     local minStrata = math.huge
-    for _, g in ipairs(atMinCount) do
+    for _, g in ipairs(groups) do
       local s = gt_DISCARD_STRATA[g.rank] or 2
       if s < minStrata then minStrata = s end
     end
     local atMinStrata = {}
-    for _, g in ipairs(atMinCount) do
+    for _, g in ipairs(groups) do
       if (gt_DISCARD_STRATA[g.rank] or 2) == minStrata then
         table.insert(atMinStrata, g)
       end
     end
 
-    -- RULE 5: Prefer mono-color groups.
-    local mono = {}
+    -- RULE 3: Within the lowest strata, prefer ranks with fewest copies in hand.
+    local minCount = math.huge
     for _, g in ipairs(atMinStrata) do
-      if isMono(g) then table.insert(mono, g) end
+      if #g.cards < minCount then minCount = #g.cards end
     end
-    local pool = (#mono > 0) and mono or atMinStrata
+    local atMinCount = {}
+    for _, g in ipairs(atMinStrata) do
+      if #g.cards == minCount then table.insert(atMinCount, g) end
+    end
 
-    -- RULE 7: Tiebreaker — lowest rank-slot within strata.
-    table.sort(pool, function(a, b)
+    -- RULE 7: Lowest rank within strata/count wins.
+    table.sort(atMinCount, function(a, b)
       return (gt_RANK_WITHIN_STRATA[a.rank] or 0) < (gt_RANK_WITHIN_STRATA[b.rank] or 0)
     end)
-    local chosen = pool[1]
+    local chosen = atMinCount[1]
 
-    -- RULE 6: Within chosen group, pick card that leaves ≥1 of each color.
+    -- RULE 6: Within chosen rank group, prefer the card that preserves color balance.
     local pick
     if #chosen.cards == 1 then
       pick = chosen.cards[1]
@@ -4815,10 +4881,9 @@ function evalDiscard(state, meldPlan, wildAllocs)
     end
 
     local reason = string.format(
-      "%s — count=%d strata=%d rank-slot=%d%s%s",
-      chosen.rank, minCount, minStrata,
+      "%s — strata=%d count=%d rank-slot=%d%s",
+      chosen.rank, minStrata, minCount,
       gt_RANK_WITHIN_STRATA[chosen.rank] or 0,
-      isMono(chosen) and " [mono]" or "",
       tag or "")
     return {card=pick, reason=reason}
   end
@@ -4887,7 +4952,11 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
         if ok and pos then table.insert(spreadLats, pos[lateralAxis]) end
       end
     end
-    if #spreadLats > 0 then
+    -- Secondary scan: find wild cards (2s/Jokers) physically mixed into a NATURAL rank meld.
+    -- Skip for wild ranks ("2"/"Joker") — their cards are already in naturalObjs and would
+    -- be double-counted, inflating total past 7 and masking an incomplete wild meld.
+    local isWildRank = (rank == "2" or rank == "Joker")
+    if #spreadLats > 0 and not isWildRank then
       local sumLat = 0
       for _, lat in ipairs(spreadLats) do sumLat = sumLat + lat end
       local avgLat = sumLat / #spreadLats
@@ -5044,14 +5113,31 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
       " wilds + 1 pair → wild meld + mixed meld")
   end
 
-  -- Suppress all wild plays when fewer than 2 red books are projected.
+  -- Suppress wild plays on RANK melds when fewer than 2 red books are projected.
   -- Adding wilds to natural melds converts them to black melds, making it harder
   -- to build a 2nd red book.  Exception: hand-emptying plays for foot pickup.
+  -- Exception: completing a WILD BOOK is always allowed — wild books are independent
+  -- of the red/black book requirement and score 1500 pts regardless.
   local projRedVal = projRed or state.bookCounts.red
+  local canCompleteWildBook = false
+  do
+    -- Find an extendable wild meld (total < 7).
+    local wm = (melds["2"]    and melds["2"].total    < 7 and melds["2"])
+            or (melds["Joker"] and melds["Joker"].total < 7 and melds["Joker"])
+    if wm and wm.total + state.wildCount >= 7 then
+      canCompleteWildBook = true   -- extending existing wild meld to 7
+    elseif not melds["2"] and not melds["Joker"] and state.wildCount >= 7 then
+      canCompleteWildBook = true   -- no wild meld yet; Phase 4 creates one from 7+ wilds
+    end
+  end
   if not hasFoot and projRedVal < 2
-     and not canEmptyWithWilds and not canEmptyViaWildMeld then
+     and not canEmptyWithWilds and not canEmptyViaWildMeld
+     and not canCompleteWildBook then
     L(string.format("Wild plays: held — build 2 red books first (projected red=%d)", projRedVal))
     return {}
+  end
+  if canCompleteWildBook and not hasFoot and projRedVal < 2 then
+    L("Wild plays: wild book completion allowed (independent of red book count)")
   end
 
   -- Gather wilds: 2s before Jokers
@@ -5080,8 +5166,11 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     local mc = m.colors or {hasRed=false, hasBlack=false}
     local colorBalanced = m.isWildMeld or (mc.hasRed and mc.hasBlack)
     local completesBook = (m.total >= 7) and colorBalanced
-    -- Merge into existing alloc when this is a follow-on wild for a Phase 1 new meld.
-    if not m.isWildMeld and m.obj == nil and not m.isNew then
+    -- Merge into existing alloc when:
+    --   (a) follow-on wild for a Phase 1 new rank meld (obj==nil, not isNew), or
+    --   (b) additional wild for a pre-existing wild meld (consolidate into one executor alloc).
+    if (not m.isWildMeld and m.obj == nil and not m.isNew)
+    or (m.isWildMeld and m.obj ~= nil) then
       for i = #allocs, 1, -1 do
         if allocs[i].rank == rank then
           table.insert(allocs[i].wilds, wildCards[nextWild])
@@ -5196,8 +5285,10 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
           local wildsLeft = #wildCards - nextWild + 1
           local mc2 = m.colors or {hasRed=false, hasBlack=false}
           local colorOk = mc2.hasRed and mc2.hasBlack
-          -- When needBlackBook, wild melds do not count as black books — exclude them.
+          -- When needBlackBook, wild melds only qualify if completing to a wild book this turn.
+          local wildBookComplete = m.isWildMeld and (m.total + math.min(wildsLeft, 7 - m.total) >= 7)
           local eligible = not needBlackBook
+                        or wildBookComplete
                         or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)
           if eligible then table.insert(preExisting, rank) end
         end
@@ -5218,8 +5309,14 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
           local wildsLeft = #wildCards - nextWild + 1
           local mc2 = m.colors or {hasRed=false, hasBlack=false}
           local colorOk = mc2.hasRed and mc2.hasBlack
-          if not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk then
-            -- Assign all wilds needed to complete this meld to a book.
+          local wildBookComplete = m.isWildMeld and (m.total + math.min(wildsLeft, 7 - m.total) >= 7)
+          if wildBookComplete then
+            -- Concentrate all wilds needed to complete this wild book.
+            while nextWild <= #wildCards and canExtend(m) and m.total < 7 do
+              assignWild(rank, 2, string.format("completes wild book (%d → 7)", m.total))
+            end
+          elseif not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk then
+            -- Assign all wilds needed to complete this black rank book.
             while nextWild <= #wildCards and canExtend(m) and m.total < 7 do
               assignWild(rank, 2,
                 string.format("completes black book %s (%d → 7)", rank, m.total))
@@ -5261,8 +5358,10 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
           local wildsLeft = #wildCards - nextWild + 1
           local mc2 = m.colors or {hasRed=false, hasBlack=false}
           local colorOk = mc2.hasRed and mc2.hasBlack
-          -- When needBlackBook, wild melds do not count as black books — exclude them.
+          -- When needBlackBook, wild melds only qualify if completing to a wild book this turn.
+          local wildBookComplete = m.isWildMeld and (m.total + math.min(wildsLeft, 7 - m.total) >= 7)
           local eligible = not needBlackBook
+                        or wildBookComplete
                         or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)
           if eligible then table.insert(candidates, m) end
         end
@@ -5568,6 +5667,18 @@ function buildTurnPlan(sColor)
     end
   end
 
+  -- Final safety check: if all plays together consumed all but 1 card, and that
+  -- remaining card would be discarded, and we can't go out, we'd empty the hand
+  -- without meeting the go-out requirement.  Scrap every play so the full hand
+  -- is available and evalDiscard can choose a proper (non-wild) card.
+  if not goOut.should and discard.card and (projHandCount - 1 == 0) then
+    L("Plays scrapped — discarding last card without going out; re-evaluating from full hand")
+    melds         = {}
+    wildAllocs    = {}
+    projHandCount = state.handCount
+    discard       = evalDiscard(state, {}, {})
+  end
+
   -- ── PLAY SUMMARY ──────────────────────────────────────────
   -- Emit after all pruning is resolved so only confirmed plays appear.
   L("")
@@ -5649,9 +5760,11 @@ function buildTurnPlan(sColor)
       L("  Wild x" .. wildN .. " : " .. loc .. xform)
     end
   end
-  -- picksUpFoot: plan empties the hand entirely (projHandCount == 0) while foot is
-  -- still on the table.  executor uses this to auto-deal foot → sort → re-plan.
-  local picksUpFoot = state.hasFoot and (projHandCount == 0)
+  -- picksUpFoot: after melds + discard the hand is empty while foot is still on the table.
+  -- This covers both the no-discard case (projHandCount==0) and the discard-last-card case
+  -- (projHandCount==1 with a discard card → 0 cards remain → pick up foot).
+  local postDiscardCount = projHandCount - (discard.card and 1 or 0)
+  local picksUpFoot = state.hasFoot and (postDiscardCount == 0)
 
   if goOut.should and not discard.card then
     L("  DISC  (going out — no discard)")
@@ -5659,6 +5772,10 @@ function buildTurnPlan(sColor)
     local r = discard.card.rank
     local s = discard.card.suit or "?"
     L(string.format("  DISC  %s of %s (going out)", r, s))
+  elseif picksUpFoot and discard.card then
+    local r = discard.card.rank
+    local s = discard.card.suit or "?"
+    L(string.format("  DISC  %s of %s (then pick up foot)", r, s))
   elseif picksUpFoot then
     L("  DISC  (none — hand empty, picking up foot)")
   elseif discard.card then
@@ -5686,11 +5803,52 @@ function executeTurnPlan(plan)
   -- Pass skipOpeningCheck=true: evalMeldsToPlay already verified the combined total.
   local t = 0
   for _, m in ipairs(plan.melds) do
-    local capturedRank = m.rank
-    Wait.time(function()
-      layoutHandRank(sColor, capturedRank, true, true)
-    end, t)
-    t = t + (m.count * 0.15) + 0.75
+    local capturedM = m
+    if m.partial then
+      -- Partial play: move only m.count specific card objects onto the existing meld.
+      -- Used when the hand has more cards of a rank than needed to complete a book.
+      Wait.time(function()
+        pcall(function()
+          local pos = getMeldAnchor(sColor, capturedM.rank)
+          if not pos then return end
+          local dt = 0
+          for i = 1, capturedM.count do
+            local entry = capturedM.cards[i]
+            if not entry then break end
+            local capturedCard = entry
+            Wait.time(function()
+              pcall(function()
+                capturedCard.obj.setRotation({0, 180, 0})
+                capturedCard.obj.setPosition(pos)
+              end)
+            end, dt)
+            dt = dt + 0.15
+          end
+          local capturedPos = pos
+          Wait.time(function()
+            pcall(function()
+              local allObjs = getMeldColumnObjects(sColor, capturedM.rank)
+              local safe = {}
+              for _, obj in ipairs(allObjs) do
+                if pcall(function() obj.getPosition() end) then table.insert(safe, obj) end
+              end
+              if #safe > 0 then
+                local anchorPos
+                pcall(function() anchorPos = safe[1].getPosition() end)
+                spread4(sColor, anchorPos or capturedPos, safe)
+              end
+            end)
+          end, dt + 1.0)
+        end)
+      end, t)
+      t = t + capturedM.count * 0.15 + 1.75
+    else
+      local capturedRank = m.rank
+      Wait.time(function()
+        layoutHandRank(sColor, capturedRank, true, true)
+      end, t)
+      t = t + (m.count * 0.15) + 0.75
+    end
   end
 
   -- Wild allocation plays (each fires after natural melds settle).
@@ -5821,8 +5979,9 @@ function executeTurnPlan(plan)
   end
 
   -- Discard fires after all melds and wild plays have finished.
-  -- Skipped when going out (no discard needed) or when the hand is empty for foot pickup.
-  if plan.discard.card and not plan.picksUpFoot then
+  -- Skipped only when going out with no discard.  When picksUpFoot is also true,
+  -- the discard runs first and foot pickup fires after it settles (extra delay below).
+  if plan.discard.card then
     Wait.time(function()
       pcall(function()
         UI.setAttribute("btnDiscard", "text", "Discard")
@@ -5847,8 +6006,11 @@ function executeTurnPlan(plan)
     end, t + 0.5)
   end
 
-  -- Foot pickup: hand emptied without discarding → auto-deal foot, sort, re-plan.
+  -- Foot pickup: hand emptied (with or without a discard) → auto-deal foot, sort, re-plan.
+  -- When a discard preceded this, add extra time for the card to reach the discard pile
+  -- and onDiscardComplete to fire before we look for the face-down foot pile.
   if plan.picksUpFoot then
+    local footDelay = plan.discard.card and (t + 1.5) or (t + 0.5)
     Wait.time(function()
       -- Find the face-down foot pile in the player's score zones.
       local footObj = nil
@@ -5886,23 +6048,29 @@ function executeTurnPlan(plan)
 
       broadcastToColor("Picking up your foot!", sColor)
 
-      -- After cards arrive: handle red 3s → sort → show plan panel.
+      -- After cards arrive: sort the hand, then branch on how foot was triggered.
+      -- No discard (hand emptied by melds): handle red 3s, sort, show new plan.
+      -- After a discard (turn is over):      just sort — no red-3 swap, no plan.
       Wait.time(function()
-        handleRedThrees(sColor, function()
-          pcall(function() sortHand(nil, sColor) end)
-          Wait.time(function()
-            gPlanResult = buildTurnPlan(sColor)
-            local text = table.concat(gPlanResult.log, "\n")
-            if text == "" then text = "(no plan output)" end
-            pcall(function() text = text .. buildStateContext(gPlanResult) end)
-            UI.setAttribute("PlanResultText", "text", text)
+        if not plan.discard.card then
+          handleRedThrees(sColor, function()
+            pcall(function() sortHand(nil, sColor) end)
             Wait.time(function()
-              UI.setAttribute("PlanResultPanel", "active", "true")
-            end, 0.05)
-          end, 0.75)
-        end)
+              gPlanResult = buildTurnPlan(sColor)
+              local text = table.concat(gPlanResult.log, "\n")
+              if text == "" then text = "(no plan output)" end
+              pcall(function() text = text .. buildStateContext(gPlanResult) end)
+              UI.setAttribute("PlanResultText", "text", text)
+              Wait.time(function()
+                UI.setAttribute("PlanResultPanel", "active", "true")
+              end, 0.05)
+            end, 0.75)
+          end)
+        else
+          pcall(function() sortHand(nil, sColor) end)
+        end
       end, 2.0)
-    end, t + 0.5)
+    end, footDelay)
   end
 end
 
@@ -6596,7 +6764,10 @@ function layoutHandRank(sColor, rank, skipRedThrees, skipOpeningCheck)
     local meldMin = openingMeldMinimum(sColor)
     if meldMin > 0 then
       local totalPts = 0
-      for _, card in ipairs(plan.cards) do totalPts = totalPts + scoreCard(card) end
+      for _, card in ipairs(plan.cards) do
+        local _, r = cardDeets(card)
+        if r ~= "3" then totalPts = totalPts + scoreCard(card) end
+      end
       if totalPts < meldMin then
         broadcastToColor(string.format(
           "Opening meld must be worth at least %d pts (these %d cards = %d pts)",
@@ -6634,7 +6805,10 @@ function layoutHandAll(sColor, skipRedThrees)
     for _, rank in ipairs(eligible) do
       local p = planLayoutRank(sColor, rank)
       if p.ok then
-        for _, card in ipairs(p.cards) do totalPts = totalPts + scoreCard(card) end
+        for _, card in ipairs(p.cards) do
+          local _, r = cardDeets(card)
+          if r ~= "3" then totalPts = totalPts + scoreCard(card) end
+        end
       end
     end
     if totalPts < meldMin then
