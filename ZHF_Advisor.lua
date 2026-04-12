@@ -1445,11 +1445,14 @@ function buildTurnPlan(sColor)
     end
   end
 
-  -- Final safety check: if all plays together consumed all but 1 card, and that
-  -- remaining card would be discarded, and we can't go out, we'd empty the hand
-  -- without meeting the go-out requirement.  Scrap every play so the full hand
-  -- is available and evalDiscard can choose a proper (non-wild) card.
-  if not goOut.should and discard.card and (projHandCount - 1 == 0) then
+  -- Final safety check: if all plays consumed all but 1 card and the remaining card
+  -- is a WILD that would be discarded without going out, scrap the plays — discarding
+  -- your last wild to empty the hand wastes it.  A natural card as the final discard
+  -- is fine: the hand empties and you draw next turn (foot already picked up) or the
+  -- foot was never on the table and you just end with a valid discard.
+  if not goOut.should and not state.hasFoot
+     and discard.card and discard.card.color == "Wild"
+     and (projHandCount - 1 == 0) then
     L("Plays scrapped — discarding last card without going out; re-evaluating from full hand")
     melds         = {}
     wildAllocs    = {}
@@ -1657,13 +1660,7 @@ function executeTurnPlan(plan)
             pcall(function() sortHand(nil, sColor) end)
             Wait.time(function()
               gPlanResult = buildTurnPlan(sColor)
-              local text = table.concat(gPlanResult.log, "\n")
-              if text == "" then text = "(no plan output)" end
-              pcall(function() text = text .. buildStateContext(gPlanResult) end)
-              UI.setAttribute("PlanResultText", "text", text)
-              Wait.time(function()
-                UI.setAttribute("PlanResultPanel", "active", "true")
-              end, 0.05)
+              showPlanPanel(gPlanResult)
             end, 0.75)
           end)
         else

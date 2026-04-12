@@ -15,6 +15,7 @@ gi_BLACK_BOOK_SCORE = 300
 gi_WILD_BOOK_SCORE = 1500
 gi_OPENING_MELD_MIN = {50, 90, 120, 150}  -- point minimum for first meld, by hand number
 gbHandWonPause = false
+gbHandOver     = false  -- true from when someone goes out until next hand is dealt
 gLEFT  = 0
 gRIGHT = 1
 gUP    = 2
@@ -423,6 +424,70 @@ end
 -- if onPlayerChangeColor fires in an unexpected order in hotswap mode.
 function onPlayerTurnStart(player_color, prev_player_color)
   setActionPanelVisibility()
+  -- Autodraw: if the player has the checkbox on and the hand is still active,
+  -- automatically draw two cards, handle red 3s, sort, then show a plan.
+  local ps = playerStuff[player_color]
+  if ps and ps.bAutodraw and not gbHandWonPause and not gbFinishFlag and not gbHandOver then
+    triggerAutodraw(player_color)
+  end
+end
+
+-- Draw 2 cards, handle red 3s, sort the hand, then build and display a plan.
+-- Called automatically by onPlayerTurnStart when bAutodraw is true.
+function triggerAutodraw(sColor)
+  if not mainDeck then return end
+
+  -- Random 1–3 second pause before drawing (feels more natural).
+  local drawDelay = 1.0 + math.random() * 2.0
+
+  -- Snapshot hand GUIDs before dealing so we can report what was drawn.
+  local preDraw = {}
+  pcall(function()
+    for _, obj in ipairs(Player[sColor].getHandObjects()) do
+      preDraw[obj.guid] = true
+    end
+  end)
+
+  Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, drawDelay)
+  Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, drawDelay + 0.5)
+
+  -- Report drawn cards.
+  Wait.time(function()
+    pcall(function()
+      local drawn = {}
+      for _, obj in ipairs(Player[sColor].getHandObjects()) do
+        if not preDraw[obj.guid] then
+          local ok, cl, rk, su = pcall(function()
+            local c, r, s = cardDeets(obj)
+            return c, r, s
+          end)
+          if ok then table.insert(drawn, rk .. " of " .. (su or "?")) end
+        end
+      end
+      if #drawn > 0 then
+        printToColor("Drew: " .. table.concat(drawn, ", "), sColor)
+      end
+    end)
+  end, drawDelay + 1.5)
+
+  -- After cards settle: handle red 3s → sort → build and show plan.
+  Wait.time(function()
+    handleRedThrees(sColor, function()
+      pcall(function() sortHand(nil, sColor) end)
+      Wait.time(function()
+        gPlanResult = buildTurnPlan(sColor)
+        showPlanPanel(gPlanResult)
+      end, 0.75)
+    end)
+  end, drawDelay + 2.5)
+end
+
+-- Toggle handler for the Autodraw checkbox in the Action Panel.
+function click_ToggleAutodraw(player, value)
+  local sColor = player.color
+  if playerStuff[sColor] then
+    playerStuff[sColor].bAutodraw = (value == "True")
+  end
 end
 
 -- =============================================================================
@@ -732,6 +797,46 @@ function buildStateContext(plan)
   return table.concat(out, "\n")
 end
 
+-- Compose the display text for a plan result, reordering so the Plays section
+-- appears at the top (most actionable info first), followed by the analysis and state.
+local SEP = "─────────────────────────────────────────────────────────"
+function planDisplayText(plan)
+  local log = (plan and plan.log) or {}
+  -- Find "Plays" line in the log.
+  local playsIdx = nil
+  for i, line in ipairs(log) do
+    if line == "Plays" then playsIdx = i; break end
+  end
+
+  local text
+  if playsIdx then
+    -- plays section: "Plays" through end of log (last line is the separator)
+    local plays = {}
+    for i = playsIdx, #log do table.insert(plays, log[i]) end
+    -- analysis section: everything before the blank line that precedes "Plays"
+    local analysis = {}
+    for i = 1, playsIdx - 2 do table.insert(analysis, log[i]) end
+    text = table.concat(plays, "\n")
+    if #analysis > 0 then
+      text = text .. "\n" .. table.concat(analysis, "\n")
+    end
+  else
+    text = table.concat(log, "\n")
+  end
+
+  if text == "" then text = "(no plan output)" end
+  pcall(function() text = text .. buildStateContext(plan) end)
+  return text
+end
+
+-- Populate and show the PlanResultPanel with a composed plan result.
+function showPlanPanel(plan)
+  UI.setAttribute("PlanResultText", "text", planDisplayText(plan))
+  Wait.time(function()
+    UI.setAttribute("PlanResultPanel", "active", "true")
+  end, 0.05)
+end
+
 -- Build the turn plan, populate the result panel, and show it.
 -- If the plan panel is already showing, execute the current plan and close it instead.
 function click_ActionPlan(player)
@@ -743,13 +848,7 @@ function click_ActionPlan(player)
     return
   end
   gPlanResult = buildTurnPlan(sColor)
-  local text = table.concat(gPlanResult.log, "\n")
-  if text == "" then text = "(no plan output)" end
-  pcall(function() text = text .. buildStateContext(gPlanResult) end)
-  UI.setAttribute("PlanResultText", "text", text)
-  Wait.time(function()
-    UI.setAttribute("PlanResultPanel", "active", "true")
-  end, 0.05)
+  showPlanPanel(gPlanResult)
 end
 
 -- Close the plan result panel without executing.
@@ -1172,6 +1271,7 @@ end
 -- =============================================================================
 function initializeHand()
   -- fire up a new hand... save the old scores, restack cards, and shuffle
+  gbHandOver     = false
   gbInitializing = true
   copyScores()
   local maindeck = stackCards()
@@ -1699,6 +1799,7 @@ function onLoad(saved_data)
                   bScoreVisible=true,
                   bAlign=1,
                   bAutoLayout=true,
+                  bAutodraw=false,
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0,  bSortLowLeft = true,   bSortAceHigh=true, sSortMetaOrder="wbpa3r>",
                   bSpreading=false, bSpreadQueued=false,
@@ -1712,6 +1813,7 @@ function onLoad(saved_data)
                   bScoreVisible=true,
                   bAlign=1,
                   bAutoLay9out=true,
+                  bAutodraw=false,
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="3apbwl<",
                   bSpreading=false, bSpreadQueued=false,
@@ -1725,6 +1827,7 @@ function onLoad(saved_data)
                   bScoreVisible=true,
                   bAlign=1,
                   bAutoLayout=true,
+                  bAutodraw=false,
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="ar",
                   bSpreading=false, bSpreadQueued=false,
@@ -1738,6 +1841,7 @@ function onLoad(saved_data)
                   bScoreVisible=true,
                   bAlign=1,
                   bAutoLayout=true,
+                  bAutodraw=false,
                   bMaskActions=false,
                   bReallySort = false, iSortWaiter=0, bSortLowLeft = true, bSortAceHigh=true, sSortMetaOrder="a",
                   bSpreading=false, bSpreadQueued=false,
@@ -4158,10 +4262,13 @@ function getMelds(sColor)
       zMin = math.min(zMin, cz - hz - 2);  zMax = math.max(zMax, cz + hz + 2)
     end
   end
+  -- Supplemental scan processes Cards only — Decks (completed books) inside zones
+  -- are already caught by the primary scan; Deck objects outside zones (draw pile,
+  -- discard pile, etc.) must not be mistaken for melds.
   if xMin < math.huge then
     for _, obj in ipairs(getObjects()) do
       pcall(function()
-        if obj.tag ~= "Card" and obj.tag ~= "Deck" then return end
+        if obj.tag ~= "Card" then return end
         local p = obj.getPosition()
         if p.x < xMin or p.x > xMax or p.z < zMin or p.z > zMax then return end
         processObj(obj)
@@ -5667,11 +5774,14 @@ function buildTurnPlan(sColor)
     end
   end
 
-  -- Final safety check: if all plays together consumed all but 1 card, and that
-  -- remaining card would be discarded, and we can't go out, we'd empty the hand
-  -- without meeting the go-out requirement.  Scrap every play so the full hand
-  -- is available and evalDiscard can choose a proper (non-wild) card.
-  if not goOut.should and discard.card and (projHandCount - 1 == 0) then
+  -- Final safety check: if all plays consumed all but 1 card and the remaining card
+  -- is a WILD that would be discarded without going out, scrap the plays — discarding
+  -- your last wild to empty the hand wastes it.  A natural card as the final discard
+  -- is fine: the hand empties and you draw next turn (foot already picked up) or the
+  -- foot was never on the table and you just end with a valid discard.
+  if not goOut.should and not state.hasFoot
+     and discard.card and discard.card.color == "Wild"
+     and (projHandCount - 1 == 0) then
     L("Plays scrapped — discarding last card without going out; re-evaluating from full hand")
     melds         = {}
     wildAllocs    = {}
@@ -6057,13 +6167,7 @@ function executeTurnPlan(plan)
             pcall(function() sortHand(nil, sColor) end)
             Wait.time(function()
               gPlanResult = buildTurnPlan(sColor)
-              local text = table.concat(gPlanResult.log, "\n")
-              if text == "" then text = "(no plan output)" end
-              pcall(function() text = text .. buildStateContext(gPlanResult) end)
-              UI.setAttribute("PlanResultText", "text", text)
-              Wait.time(function()
-                UI.setAttribute("PlanResultPanel", "active", "true")
-              end, 0.05)
+              showPlanPanel(gPlanResult)
             end, 0.75)
           end)
         else
@@ -8046,7 +8150,8 @@ function checkFootNote(sColor, iCheckCount)
           soundCube.AssetBundle.playTriggerEffect(13)
           broadcastToAll(coolName(sColor) .. " has gone out!!","Yellow")
           gbHandWonPause = true
-          gbFinishFlag = true
+          gbFinishFlag   = true
+          gbHandOver     = true
           recordScores()
           Wait.time(function() gbFinishFlag=false; setCardDecal(); end, 10.0)
           Wait.time(function() gbHandWonPause=false end, 5.0)
