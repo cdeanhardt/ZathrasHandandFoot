@@ -432,6 +432,25 @@ function onPlayerTurnStart(player_color, prev_player_color)
   end
 end
 
+-- Poll getHandObjects() until the count reaches expectedCount (or maxWait seconds
+-- elapses), then call callback.  Checks every 0.2 s.  Use this instead of a fixed
+-- Wait.time after deal() so that sortHand never runs before new cards have registered.
+local function waitForHandGrowth(sColor, expectedCount, maxWait, callback)
+  local elapsed = 0
+  local interval = 0.2
+  local function check()
+    local n = 0
+    pcall(function() n = #Player[sColor].getHandObjects() end)
+    if n >= expectedCount or elapsed >= maxWait then
+      callback()
+    else
+      elapsed = elapsed + interval
+      Wait.time(check, interval)
+    end
+  end
+  Wait.time(check, interval)
+end
+
 -- Draw 2 cards, handle red 3s, sort the hand, then build and display a plan.
 -- Called automatically by onPlayerTurnStart when bAutodraw is true.
 function triggerAutodraw(sColor)
@@ -440,18 +459,19 @@ function triggerAutodraw(sColor)
   -- Random 1–3 second pause before drawing (feels more natural).
   local drawDelay = 1.0 + math.random() * 2.0
 
-  -- Snapshot hand GUIDs before dealing so we can report what was drawn.
+  -- Snapshot hand count AND GUIDs before dealing.
+  local preCount = 0
   local preDraw = {}
   pcall(function()
-    for _, obj in ipairs(Player[sColor].getHandObjects()) do
-      preDraw[obj.guid] = true
-    end
+    local objs = Player[sColor].getHandObjects()
+    preCount = #objs
+    for _, obj in ipairs(objs) do preDraw[obj.guid] = true end
   end)
 
   Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, drawDelay)
   Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, drawDelay + 0.5)
 
-  -- Report drawn cards.
+  -- Report drawn cards (cosmetic — fixed timer is fine here).
   Wait.time(function()
     pcall(function()
       local drawn = {}
@@ -470,16 +490,20 @@ function triggerAutodraw(sColor)
     end)
   end, drawDelay + 1.5)
 
-  -- After cards settle: handle red 3s → sort → build and show plan.
+  -- After second deal fires, poll until both cards register (or 4 s timeout),
+  -- then handle red 3s → sort → plan.  This prevents sortHand from running
+  -- before newly dealt cards appear in getHandObjects().
   Wait.time(function()
-    handleRedThrees(sColor, function()
-      pcall(function() sortHand(nil, sColor) end)
-      Wait.time(function()
-        gPlanResult = buildTurnPlan(sColor)
-        showPlanPanel(gPlanResult)
-      end, 0.75)
+    waitForHandGrowth(sColor, preCount + 2, 4.0, function()
+      handleRedThrees(sColor, function()
+        pcall(function() sortHand(nil, sColor) end)
+        Wait.time(function()
+          gPlanResult = buildTurnPlan(sColor)
+          showPlanPanel(gPlanResult)
+        end, 0.75)
+      end)
     end)
-  end, drawDelay + 2.5)
+  end, drawDelay + 0.6)
 end
 
 -- Toggle handler for the Autodraw checkbox in the Action Panel.
@@ -531,10 +555,13 @@ function click_ActionLayoutAllHand(player)
 end
 
 -- "Draw, Sort, Play Lay": draw 2, sort, play hand, then layout all.
--- Sequence: deal → wait for cards to arrive → red 3s → sort →
+-- Sequence: deal → poll until cards register → red 3s → sort →
 --           play hand onto existing melds → layout remaining eligible ranks.
 function click_ActionDrawSortPlayLay(player)
   local sColor = player.color
+
+  local preCount = 0
+  pcall(function() preCount = #Player[sColor].getHandObjects() end)
 
   -- Draw 2 cards from the main deck.
   if mainDeck then
@@ -542,31 +569,33 @@ function click_ActionDrawSortPlayLay(player)
     Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, 0.5)
   end
 
-  -- Wait for cards to arrive in hand, then handle red 3s and continue.
+  -- Poll until both cards register (or 4 s timeout), then handle red 3s and continue.
   Wait.time(function()
-    handleRedThrees(sColor, function()
-      -- Sort is synchronous — runs immediately after red 3s are cleared.
-      pcall(function() sortHand(nil, sColor) end)
+    waitForHandGrowth(sColor, preCount + 2, 4.0, function()
+      handleRedThrees(sColor, function()
+        -- Sort is synchronous — runs immediately after red 3s are cleared.
+        pcall(function() sortHand(nil, sColor) end)
 
-      -- Brief pause for sort to visually complete, then play hand.
-      Wait.time(function()
-        local playPlan = planAutoPlay(sColor)
-        local playDuration = 0
-        if playPlan.ok then
-          executeAutoPlay(sColor, playPlan)
-          for _, move in ipairs(playPlan.moves) do
-            playDuration = playDuration + (#move.cards * 0.75) + 0.75
-          end
-        end
-
-        -- Layout all eligible ranks after play finishes.
+        -- Brief pause for sort to visually complete, then play hand.
         Wait.time(function()
-          layoutHandAll(sColor, true)
-        end, playDuration + 0.5)
+          local playPlan = planAutoPlay(sColor)
+          local playDuration = 0
+          if playPlan.ok then
+            executeAutoPlay(sColor, playPlan)
+            for _, move in ipairs(playPlan.moves) do
+              playDuration = playDuration + (#move.cards * 0.75) + 0.75
+            end
+          end
 
-      end, 0.5)
+          -- Layout all eligible ranks after play finishes.
+          Wait.time(function()
+            layoutHandAll(sColor, true)
+          end, playDuration + 0.5)
+
+        end, 0.5)
+      end)
     end)
-  end, 2.5)
+  end, 0.6)
 end
 
 -- Compute the suggested discard for sColor and update the Discard button label.
@@ -601,18 +630,19 @@ function click_ActionDraw(player)
   local sColor = player.color
   if not mainDeck then return end
 
-  -- Snapshot GUIDs already in hand before dealing.
+  -- Snapshot count and GUIDs already in hand before dealing.
+  local preCount = 0
   local preDraw = {}
   pcall(function()
-    for _, obj in ipairs(Player[sColor].getHandObjects()) do
-      preDraw[obj.guid] = true
-    end
+    local objs = Player[sColor].getHandObjects()
+    preCount = #objs
+    for _, obj in ipairs(objs) do preDraw[obj.guid] = true end
   end)
 
   pcall(function() mainDeck.deal(1, sColor) end)
   Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, 0.5)
 
-  -- After both cards have landed: report drawn cards to player, then sort.
+  -- Report drawn cards (cosmetic — fixed timer is fine here).
   Wait.time(function()
     pcall(function()
       local drawn = {}
@@ -633,13 +663,16 @@ function click_ActionDraw(player)
     end)
   end, 1.5)
 
+  -- Poll until both cards register (or 4 s timeout), then sort.
   Wait.time(function()
-    handleRedThrees(sColor, function()
-      Wait.time(function() sortHand(nil, sColor) end, 0.5)
-      -- After sort settles, compute and display the suggested discard.
-      Wait.time(function() updateDiscardButton(sColor) end, 1.5)
+    waitForHandGrowth(sColor, preCount + 2, 4.0, function()
+      handleRedThrees(sColor, function()
+        Wait.time(function() sortHand(nil, sColor) end, 0.5)
+        -- After sort settles, compute and display the suggested discard.
+        Wait.time(function() updateDiscardButton(sColor) end, 1.5)
+      end)
     end)
-  end, 2.5)
+  end, 0.6)
 end
 
 -- Auto-discard: evaluate the best discard from the current hand and move it.
@@ -4220,6 +4253,21 @@ function getMelds(sColor)
         pcall(function()
           for _, obj in ipairs(p.getHandObjects()) do
             handGuids[obj.getGUID()] = true
+          end
+        end)
+      end
+    end
+  end)
+  -- Also exclude any object physically inside a player's TTS hand zone.
+  -- Cards that fail to enter the hand system (TTS race condition with setPositionSmooth
+  -- or rapid dealing) land as physical objects inside the hand zone but are NOT returned
+  -- by getHandObjects().  Without this, the meld scan mistakes them for table melds.
+  pcall(function()
+    for _, zoneObj in pairs(obj_Zone or {}) do
+      if zoneObj then
+        pcall(function()
+          for _, obj in ipairs(zoneObj.getObjects()) do
+            pcall(function() handGuids[obj.getGUID()] = true end)
           end
         end)
       end
