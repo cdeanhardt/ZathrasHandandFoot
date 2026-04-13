@@ -196,6 +196,7 @@
         <Toggle id="toggleAutoExec"
                 text=" Auto Exec"
                 isOn="false"
+                onValueChanged="click_ToggleAutoExec"
                 width="174" height="25"
                 rectAlignment="UpperCenter" offsetXY="0 -293"
                 fontSize="12" textColor="#FFFFFF"

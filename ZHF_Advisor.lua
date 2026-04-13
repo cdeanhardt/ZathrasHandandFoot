@@ -817,6 +817,18 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
   local otherFoot     = state.otherFootOnTable
   local needBlackBook = state.bookCounts.black < 2
 
+  -- Count opponent's books — used for emptyHandCap and post-foot wild play decisions.
+  local otherBooks = 0
+  pcall(function()
+    for _, color in ipairs(playerList or {}) do
+      if color ~= state.color and not playerHasFoot(color) then
+        for _, m in ipairs(getMelds(color)) do
+          if m.isBook and classifyBook(m.obj) then otherBooks = otherBooks + 1 end
+        end
+      end
+    end
+  end)
+
   -- How many wild-assisted pair melds are acceptable when emptying the hand to pick up the
   -- foot.  Scales with game pressure from the other player(s):
   --   otherFoot=true  (other still has foot on table)  → conservative: 1 pair
@@ -829,16 +841,6 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
   elseif otherFoot then
     emptyHandCap = 1                -- other player not yet in foot: be conservative
   else
-    local otherBooks = 0
-    pcall(function()
-      for _, color in ipairs(playerList or {}) do
-        if color ~= state.color and not playerHasFoot(color) then
-          for _, m in ipairs(getMelds(color)) do
-            if m.isBook and classifyBook(m.obj) then otherBooks = otherBooks + 1 end
-          end
-        end
-      end
-    end)
     emptyHandCap = (otherBooks >= 3) and 3 or 2
   end
 
@@ -995,6 +997,25 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     return not hasFoot or needBlackBook or not otherFoot
   end
 
+  -- After foot pickup, should a wild be added to this pre-existing rank meld?
+  -- YES: the wild completes the book (total + 1 == 7).
+  -- YES: total + 1 == 6 and urgency exception (opponent has 3+ books, we have
+  --      >= 2 red books, still need black books) — sets up a 1-wild book next turn.
+  -- NO:  anything further from completion — keep the wild for a future black/wild book.
+  -- Wild melds and new-this-turn melds are not restricted by this predicate.
+  local function postFootRankOk(m)
+    if hasFoot then return true end
+    if m.isWildMeld then return true end
+    if m.obj == nil  then return true end
+    if m.total + 1 >= 7 then return true end      -- completes book
+    if m.total + 1 == 6 then                       -- one more wild after this = book
+      return otherBooks >= 3
+         and state.bookCounts.red  >= 2
+         and state.bookCounts.black < 2
+    end
+    return false                                   -- too far from completion
+  end
+
   -- Rank priority for Phase 1 pair selection (highest value first → more points as a book).
   local rankPriority = {
     ["A"]=13,["K"]=12,["Q"]=11,["J"]=10,["10"]=9,
@@ -1103,10 +1124,14 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
         for _, rank in ipairs(preExisting) do
           if nextWild > #wildCards then break end
           local m = melds[rank]
-          local label = m.isWildMeld
-            and string.format("extends wild meld (%d cards on table)", m.total)
-            or  string.format("extends black meld %s (%d cards on table)", rank, m.total)
-          assignWild(rank, 2, label)
+          if not postFootRankOk(m) then
+            L(string.format("  [w-skip] %s — post-foot: wild would not complete book (%d cards)", rank, m.total))
+          else
+            local label = m.isWildMeld
+              and string.format("extends wild meld (%d cards on table)", m.total)
+              or  string.format("extends black meld %s (%d cards on table)", rank, m.total)
+            assignWild(rank, 2, label)
+          end
         end
       end
     end
@@ -1136,9 +1161,10 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
           local colorOk = mc2.hasRed and mc2.hasBlack
           -- When needBlackBook, wild melds only qualify if completing to a wild book this turn.
           local wildBookComplete = m.isWildMeld and (m.total + math.min(wildsLeft, 7 - m.total) >= 7)
-          local eligible = not needBlackBook
+          local eligible = (not needBlackBook
                         or wildBookComplete
-                        or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)
+                        or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk))
+                        and postFootRankOk(m)
           if eligible then table.insert(candidates, m) end
         end
       end
@@ -1196,9 +1222,15 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     local candidates = {}
     for _, m in pairs(melds) do
       if canExtend(m) then
-        local freePlace = canEmptyWithWilds or canEmptyViaWildMeld or hasFoot
-        local eligible  = freePlace or not needBlackBook
-                          or m.isWildMeld or (m.total + 1 >= 7)
+        local wildsLeft5 = #wildCards - nextWild + 1
+        -- Wild melds: only extend if completing a wild book this turn, or black book goal met.
+        local wildMeldOk = not m.isWildMeld
+                        or not needBlackBook
+                        or (m.total + wildsLeft5 >= 7)
+        local freePlace  = canEmptyWithWilds or canEmptyViaWildMeld or hasFoot
+        local eligible   = wildMeldOk
+                        and postFootRankOk(m)
+                        and (freePlace or not needBlackBook or (m.total + 1 >= 7))
         if eligible then table.insert(candidates, m) end
       end
     end
