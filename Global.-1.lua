@@ -680,6 +680,44 @@ end
 -- Stored plan from the last click_ActionPlan call; held so click_PlanExecute can use it.
 gPlanResult = nil
 
+-- Wait ID for the auto-exec countdown; non-nil while a countdown is running.
+gAutoExecWaitId = nil
+
+local AUTOEXEC_BAR_WIDTH = 404  -- must match progressBarBg width in XML
+local AUTOEXEC_TICK      = 0.05 -- seconds per tick (20 ticks/sec)
+
+-- Cancel any running auto-exec countdown without closing the panel.
+local function cancelAutoExecTimer()
+  if gAutoExecWaitId then
+    Wait.stop(gAutoExecWaitId)
+    gAutoExecWaitId = nil
+  end
+  UI.setAttribute("progressBarFill", "width", "0")
+end
+
+-- Start a random 5-8 second countdown that auto-executes the plan on expiry.
+local function startAutoExecTimer()
+  cancelAutoExecTimer()
+  local duration   = math.random(5, 8)
+  local totalTicks = math.ceil(duration / AUTOEXEC_TICK)
+  local remaining  = totalTicks
+  UI.setAttribute("progressBarFill", "width", tostring(AUTOEXEC_BAR_WIDTH))
+
+  local function tick()
+    remaining = remaining - 1
+    local w = math.max(0, math.floor(AUTOEXEC_BAR_WIDTH * remaining / totalTicks))
+    UI.setAttribute("progressBarFill", "width", tostring(w))
+    if remaining <= 0 then
+      gAutoExecWaitId = nil
+      click_PlanExecute(nil)
+    else
+      gAutoExecWaitId = Wait.time(tick, AUTOEXEC_TICK)
+    end
+  end
+
+  gAutoExecWaitId = Wait.time(tick, AUTOEXEC_TICK)
+end
+
 -- Build a compact machine-readable state context block appended below the plan log.
 -- Intended for copy-paste analysis: provides full hand, melds, books, and foot status.
 local _SC_RANK = {["Ace"]="A",["2"]="2",["3"]="3",["4"]="4",["5"]="5",
@@ -830,10 +868,15 @@ function planDisplayText(plan)
 end
 
 -- Populate and show the PlanResultPanel with a composed plan result.
+-- Starts the auto-exec countdown if the Auto Exec toggle is on.
 function showPlanPanel(plan)
+  UI.setAttribute("progressBarFill", "width", "0")
   UI.setAttribute("PlanResultText", "text", planDisplayText(plan))
   Wait.time(function()
     UI.setAttribute("PlanResultPanel", "active", "true")
+    if UI.getAttribute("toggleAutoExec", "isOn") == "true" then
+      startAutoExecTimer()
+    end
   end, 0.05)
 end
 
@@ -842,6 +885,7 @@ end
 function click_ActionPlan(player)
   local sColor = player.color
   if UI.getAttribute("PlanResultPanel", "active") == "true" then
+    cancelAutoExecTimer()
     if gPlanResult then executeTurnPlan(gPlanResult) end
     UI.setAttribute("PlanResultPanel", "active", "false")
     gPlanResult = nil
@@ -851,8 +895,14 @@ function click_ActionPlan(player)
   showPlanPanel(gPlanResult)
 end
 
+-- Stop the auto-exec countdown but leave the panel open for manual action.
+function click_PlanStop(player)
+  cancelAutoExecTimer()
+end
+
 -- Close the plan result panel without executing.
 function click_PlanClose(player)
+  cancelAutoExecTimer()
   UI.setAttribute("PlanResultPanel", "active", "false")
   gPlanResult = nil
 end
@@ -869,6 +919,7 @@ end
 
 -- Execute the stored plan, then close the panel.
 function click_PlanExecute(player)
+  cancelAutoExecTimer()
   UI.setAttribute("PlanResultPanel", "active", "false")
   if gPlanResult then
     executeTurnPlan(gPlanResult)
