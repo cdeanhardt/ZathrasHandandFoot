@@ -710,7 +710,7 @@ function click_ActionDiscard(player)
   end)
 end
 
--- Stored plan from the last click_ActionPlan call; held so click_PlanExecute can use it.
+-- Stored  plan from the last click_ActionPlan call; held so click_PlanExecute can use it.
 gPlanResult = nil
 
 -- Wait ID for the auto-exec countdown; non-nil while a countdown is running.
@@ -730,10 +730,11 @@ local function cancelAutoExecTimer()
   UI.setAttribute("progressBarFill", "width", "0")
 end
 
--- Start a random 5-8 second countdown that auto-executes the plan on expiry.
-local function startAutoExecTimer()
+-- Start a random countdown that auto-executes the plan on expiry.
+-- minSec/maxSec default to 5/8; pass 3/6 when no melds are on the table yet.
+local function startAutoExecTimer(minSec, maxSec)
   cancelAutoExecTimer()
-  local duration   = math.random(5, 8)
+  local duration   = math.random(minSec or 5, maxSec or 8)
   local totalTicks = math.ceil(duration / AUTOEXEC_TICK)
   local remaining  = totalTicks
   UI.setAttribute("progressBarFill", "width", tostring(AUTOEXEC_BAR_WIDTH))
@@ -904,13 +905,20 @@ end
 
 -- Populate and show the PlanResultPanel with a composed plan result.
 -- Starts the auto-exec countdown if the Auto Exec toggle is on.
+-- Uses a shorter 3-6 s window when the player has no melds on the table yet
+-- (less to read), and the normal 5-8 s window once melds are established.
 function showPlanPanel(plan)
   UI.setAttribute("progressBarFill", "width", "0")
   UI.setAttribute("PlanResultText", "text", planDisplayText(plan))
   Wait.time(function()
     UI.setAttribute("PlanResultPanel", "active", "true")
     if gAutoExecEnabled then
-      startAutoExecTimer()
+      local noMelds = not plan or not plan.state or #plan.state.melds == 0
+      if noMelds then
+        startAutoExecTimer(3, 6)
+      else
+        startAutoExecTimer(5, 8)
+      end
     end
   end, 0.05)
 end
@@ -3026,8 +3034,12 @@ function getOwnerOfObject(oObj)
 end
 -- =============================================================================
 function spread4(player, desiredPos, tCards)
-  if not playerStuff[player].bSpreading then
-    playerStuff[player].bSpreading = true
+  -- Note: the old re-entrancy guard (bSpreading check) has been removed.
+  -- TTS Lua is single-threaded so spread4 cannot be re-entered, but the guard
+  -- could get stuck `true` on an early return or unhandled error, silently
+  -- dropping the next spread call. Always run; just track state for callers.
+  playerStuff[player].bSpreading = true
+  do
     local spinMult = 0.75
     local dropHeight = 0.4
     local deckType = "Unknown"
@@ -3330,12 +3342,9 @@ function spread4(player, desiredPos, tCards)
       debug("cardtype, decktype, cardcount = " .. nvl(cardType) .. ", " .. nvl(deckType) .. ", " .. nvl(cardCount), "prob1")
     end
     debug("spread-topdropspot2 = " .. dump(vTopDropSpot),"layoutsel")
-    playerStuff[player].bSpreading=false
-    return vTopDropSpot
-  else
-    debug("Avoided a spread, we were already doing one","spread")
-  end
+  end  -- do
   playerStuff[player].bSpreading=false
+  return vTopDropSpot
 end
 
 -- =============================================================================
@@ -3346,8 +3355,9 @@ end
 
 -- =============================================================================
 function spread3x(spread, player, rottype, desiredPos, tCards)
-  if not playerStuff[player].bSpreading then
-    playerStuff[player].bSpreading = true
+  -- Same fix as spread4: removed re-entrancy guard; always runs.
+  playerStuff[player].bSpreading = true
+  do
     local spinMult = 0.75
     local dropHeight = 0.4
     local deckType = "Unknown"
@@ -3751,13 +3761,9 @@ function spread3x(spread, player, rottype, desiredPos, tCards)
       debug("cardtype, decktype, cardcount = " .. cardType .. ", " .. deckType .. ", " .. cardCount, "prob1")
     end
     debug("spread-topdropspot2 = " .. dump(vTopDropSpot),"layoutsel")
-    playerStuff[player].bSpreading=false
-    return vTopDropSpot
-  else
-    debug("Avoided a spread","prob1")
-  end
+  end  -- do
   playerStuff[player].bSpreading=false
-
+  return vTopDropSpot
 end
 
 
