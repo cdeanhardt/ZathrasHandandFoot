@@ -913,10 +913,14 @@ function showPlanPanel(plan)
   Wait.time(function()
     UI.setAttribute("PlanResultPanel", "active", "true")
     if gAutoExecEnabled then
-      local noMelds = not plan or not plan.state or #plan.state.melds == 0
-      if noMelds then
-        startAutoExecTimer(3, 6)
+      local state   = plan and plan.state
+      local noMelds = not state or #state.melds == 0
+      local hasFoot = state and state.hasFoot  -- true = foot pile still on table
+      if noMelds or hasFoot then
+        -- Before first meld, or melds exist but foot not yet picked up
+        startAutoExecTimer(2, 4)
       else
+        -- After foot has been picked up
         startAutoExecTimer(5, 8)
       end
     end
@@ -1847,7 +1851,7 @@ function onLoad(saved_data)
   obj_Zone["White"] = obj_Zone_White
   for sColor, zone in pairs(obj_Zone) do
     local c = sColor
-    zone.addContextMenuItem("Layout All Hand",  function() layoutHandAll(c)         end, false)
+    zone.addContextMenuItem("Layout All Hand",  function() layoutHandAll(c, false, true) end, false)
   end
 
   objTable = getObjectFromGUID('bd69bd')
@@ -4463,7 +4467,17 @@ function canMeld(sColor, rank)
     return {ok=false, reason="only " .. cnt .. " of rank " .. rank .. " in hand (need 3)"}
   end
   if (total - cnt) < 2 then
-    return {ok=false, reason="would leave fewer than 2 cards in hand"}
+    -- Exception: allow when the player can go out (2+ red, 2+ black books, no foot).
+    local canGoOut = false
+    pcall(function()
+      local st = snapshotState(sColor)
+      canGoOut = not st.hasFoot
+                 and st.bookCounts.red   >= 2
+                 and st.bookCounts.black >= 2
+    end)
+    if not canGoOut then
+      return {ok=false, reason="would leave fewer than 2 cards in hand"}
+    end
   end
   return {ok=true, reason="ok"}
 end
@@ -4553,6 +4567,23 @@ local function hasExistingMeldsOrBooks(state)
     if isEligibleRank(rank) and (meld.count or 1) >= 3 then return true end
   end
   return false
+end
+
+-- Point value of cards already on the table that should count toward the opening meld
+-- minimum: wild meld cards (2s=20 pts, Jokers=50 pts) plus any existing rank meld
+-- cards too small to bypass the check on their own (< 3 natural cards).
+-- When combined with the planned natural meld points, this total must meet the minimum.
+local function alreadyPlayedOpeningPts(state)
+  local RANK_PTS = {
+    ["Joker"]=50, ["2"]=20,  ["A"]=20,
+    ["K"]=10, ["Q"]=10, ["J"]=10, ["10"]=10,
+    ["9"]=5,  ["8"]=5,  ["7"]=5,  ["6"]=5, ["5"]=5, ["4"]=5,
+  }
+  local total = 0
+  for rank, meld in pairs(state.meldsByRank) do
+    total = total + (RANK_PTS[rank] or 5) * (meld.count or 1)
+  end
+  return total
 end
 
 -- Count wild cards in a Card or Deck TTS object.  Safe: never throws.
@@ -4858,13 +4889,14 @@ function evalMeldsToPlay(state)
     return a.count > b.count
   end)
 
-  -- Opening meld check: if the player has no existing melds or books, the total
-  -- point value of all planned new melds must meet the hand's minimum threshold.
-  -- If the threshold isn't met, suppress all melds (can't open yet).
+  -- Opening meld check: if the player has no existing natural melds or books, the
+  -- combined point value of (a) cards already on the table in wild/black melds plus
+  -- (b) planned natural meld cards must meet the hand's minimum threshold.
+  -- Wild meld cards count at full value (2s=20 pts, Jokers=50 pts).
   -- Exclude red-3 stacks (rank "3") — they are not real melds for opening purposes.
   if not hasExistingMeldsOrBooks(state) then
-    local minimum = gi_OPENING_MELD_MIN[giHand] or 50
-    local totalPts = 0
+    local minimum  = gi_OPENING_MELD_MIN[giHand] or 50
+    local totalPts = alreadyPlayedOpeningPts(state)   -- seed with already-played value
     for _, plan in ipairs(plans) do
       for _, card in ipairs(plan.cards) do
         if card.rank ~= "3" then   -- red 3s never count toward opening minimum
@@ -5340,13 +5372,19 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
   -- Exception: completing a WILD BOOK is always allowed — wild books are independent
   -- of the red/black book requirement and score 1500 pts regardless.
   local projRedVal = projRed or state.bookCounts.red
+
+  -- Combined total of all existing wild meld cards on table (2s and Jokers may live in
+  -- separate piles but can be consolidated by the executor into one 7-card wild book).
+  -- Used throughout Phases 2–5 to detect wild book completability.
+  local combinedWildOnTable = 0
+  for _, m in pairs(melds) do
+    if m.isWildMeld and m.obj ~= nil then combinedWildOnTable = combinedWildOnTable + m.total end
+  end
+
   local canCompleteWildBook = false
   do
-    -- Find an extendable wild meld (total < 7).
-    local wm = (melds["2"]    and melds["2"].total    < 7 and melds["2"])
-            or (melds["Joker"] and melds["Joker"].total < 7 and melds["Joker"])
-    if wm and wm.total + state.wildCount >= 7 then
-      canCompleteWildBook = true   -- extending existing wild meld to 7
+    if combinedWildOnTable > 0 and combinedWildOnTable + state.wildCount >= 7 then
+      canCompleteWildBook = true   -- combined wild meld piles + hand wilds reach 7
     elseif not melds["2"] and not melds["Joker"] and state.wildCount >= 7 then
       canCompleteWildBook = true   -- no wild meld yet; Phase 4 creates one from 7+ wilds
     end
@@ -5525,18 +5563,26 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
           local wildsLeft = #wildCards - nextWild + 1
           local mc2 = m.colors or {hasRed=false, hasBlack=false}
           local colorOk = mc2.hasRed and mc2.hasBlack
-          -- When needBlackBook, wild melds only qualify if completing to a wild book this turn.
-          local wildBookComplete = m.isWildMeld and (m.total + math.min(wildsLeft, 7 - m.total) >= 7)
-          local eligible = not needBlackBook
-                        or wildBookComplete
-                        or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)
+          -- Wild melds: only eligible when adding hand wilds completes a 7-card book (Rule 1).
+          -- Never add a partial wild to an existing wild meld — keep it for rank/black books.
+          local wildBookComplete = m.isWildMeld
+            and (combinedWildOnTable + math.min(wildsLeft, 7 - combinedWildOnTable) >= 7)
+          local eligible = (m.isWildMeld and wildBookComplete)
+                        or (not m.isWildMeld and (not needBlackBook
+                            or (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk))
           if eligible then table.insert(preExisting, rank) end
         end
       end
       if needBlackBook then
-        -- Sort: fewest additional wilds needed to complete a book first (closest to 7).
+        -- Sort: wild book completion takes highest priority; otherwise fewest-wilds-needed first.
         table.sort(preExisting, function(a, b)
           local ma, mb = melds[a], melds[b]
+          -- When a wild book is achievable, wild melds sort before all rank melds.
+          if canCompleteWildBook and ma.isWildMeld ~= mb.isWildMeld then
+            return ma.isWildMeld
+          end
+          -- Among wild melds, larger pile first (concentrate wilds onto the biggest pile).
+          if ma.isWildMeld and mb.isWildMeld then return ma.total > mb.total end
           local na = 7 - ma.total   -- additional wilds needed to reach 7
           local nb = 7 - mb.total
           if na ~= nb then return na < nb end
@@ -5549,11 +5595,17 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
           local wildsLeft = #wildCards - nextWild + 1
           local mc2 = m.colors or {hasRed=false, hasBlack=false}
           local colorOk = mc2.hasRed and mc2.hasBlack
-          local wildBookComplete = m.isWildMeld and (m.total + math.min(wildsLeft, 7 - m.total) >= 7)
+          local wildBookComplete = m.isWildMeld
+            and (combinedWildOnTable + math.min(wildsLeft, 7 - combinedWildOnTable) >= 7)
           if wildBookComplete then
-            -- Concentrate all wilds needed to complete this wild book.
-            while nextWild <= #wildCards and canExtend(m) and m.total < 7 do
-              assignWild(rank, 2, string.format("completes wild book (%d → 7)", m.total))
+            -- Add only the minimum hand wilds needed to complete the book; save extras for rank melds.
+            -- Executor merges the smaller wild meld pile into this one to form the 7-card book.
+            local neededForBook = math.max(0, 7 - combinedWildOnTable)
+            local addedToWild = 0
+            while nextWild <= #wildCards and canExtend(m) and addedToWild < neededForBook do
+              assignWild(rank, 2, string.format(
+                "completes wild book (combined %d on table + %d hand → 7)", combinedWildOnTable, neededForBook))
+              addedToWild = addedToWild + 1
             end
           elseif not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk then
             -- Assign all wilds needed to complete this black rank book.
@@ -5567,13 +5619,25 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
         for _, rank in ipairs(preExisting) do
           if nextWild > #wildCards then break end
           local m = melds[rank]
-          if not postFootRankOk(m) then
+          if m.isWildMeld then
+            -- Wild meld reached preExisting only because wildBookComplete was true.
+            -- Add only the minimum hand wilds needed; save extras for rank melds.
+            local neededForBook = math.max(0, 7 - combinedWildOnTable)
+            local addedToWild = 0
+            while nextWild <= #wildCards and canExtend(m) and addedToWild < neededForBook do
+              assignWild(rank, 2, string.format(
+                "completes wild book (combined %d on table + %d hand → 7)", combinedWildOnTable, neededForBook))
+              addedToWild = addedToWild + 1
+            end
+          elseif not postFootRankOk(m) then
             L(string.format("  [w-skip] %s — post-foot: wild would not complete book (%d cards)", rank, m.total))
           else
-            local label = m.isWildMeld
-              and string.format("extends wild meld (%d cards on table)", m.total)
-              or  string.format("extends black meld %s (%d cards on table)", rank, m.total)
-            assignWild(rank, 2, label)
+            local mc2r = m.colors or {hasRed=false, hasBlack=false}
+            if not (mc2r.hasRed and mc2r.hasBlack) then
+              L(string.format("  [w-skip] %s — single-color meld, wild can't make a valid black book", rank))
+            else
+              assignWild(rank, 2, string.format("extends black meld %s (%d cards on table)", rank, m.total))
+            end
           end
         end
       end
@@ -5593,32 +5657,51 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     end
 
     -- Phase 3: remaining wilds → fewest-cards-first.
-    -- Wild melds always eligible; rank melds only when player has no foot (via canExtend).
-    -- When needBlackBook, rank melds qualify when available wilds can still complete them.
+    -- Rank melds only when player has no foot (via canExtend).
+    -- Wild melds: only eligible when the combined pile will reach 7 this turn (Rule 1).
+    -- Dynamic combinedNow re-evaluated each iteration so partial adds stop once book is done.
     while nextWild <= #wildCards do
       local candidates = {}
+      -- Recompute combined wild total dynamically (assignWild updates m.total in-place).
+      local combinedNow = 0
+      for _, m in pairs(melds) do
+        if m.isWildMeld then combinedNow = combinedNow + m.total end
+      end
       for _, m in pairs(melds) do
         if canExtend(m) then
           local wildsLeft = #wildCards - nextWild + 1
           local mc2 = m.colors or {hasRed=false, hasBlack=false}
           local colorOk = mc2.hasRed and mc2.hasBlack
-          -- When needBlackBook, wild melds only qualify if completing to a wild book this turn.
-          local wildBookComplete = m.isWildMeld and (m.total + math.min(wildsLeft, 7 - m.total) >= 7)
-          local eligible = (not needBlackBook
-                        or wildBookComplete
-                        or (not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk))
-                        and postFootRankOk(m)
-          if eligible then table.insert(candidates, m) end
+          -- Wild melds: only if combined total will reach exactly 7 and book not yet complete.
+          local wildBookComplete = m.isWildMeld and combinedNow < 7
+            and (combinedNow + math.min(wildsLeft, 7 - combinedNow) >= 7)
+          -- Rank melds must have at least one card of each suit-color before a wild
+          -- can make them a valid black book (red card + black card required).
+          local mc3 = m.colors or {hasRed=false, hasBlack=false}
+          local rankEligible = not m.isWildMeld
+            and (mc3.hasRed and mc3.hasBlack)
+            and (not needBlackBook or (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7))
+            and postFootRankOk(m)
+          if wildBookComplete or rankEligible then table.insert(candidates, m) end
         end
       end
       if #candidates == 0 then break end
-      table.sort(candidates, function(a, b) return a.total < b.total end)
+      table.sort(candidates, function(a, b)
+        -- Wild book completion takes priority; among wild melds, larger pile first.
+        if a.isWildMeld ~= b.isWildMeld then return a.isWildMeld end
+        if a.isWildMeld and b.isWildMeld then return a.total > b.total end
+        return a.total < b.total
+      end)
       local placed = false
       for _, m in ipairs(candidates) do
         if canExtend(m) then  -- re-check: assignWild may have updated m.wilds/m.total
-          placed = assignWild(m.rank, 3,
-            string.format("extends %s (%d cards, fewest-first)",
-              m.isWildMeld and "wild meld" or ("black meld "..m.rank), m.total))
+          local reason
+          if m.isWildMeld then
+            reason = string.format("completes wild book (combined %d on table + hand → 7)", combinedNow)
+          else
+            reason = string.format("extends black meld %s (%d cards, fewest-first)", m.rank, m.total)
+          end
+          placed = assignWild(m.rank, 3, reason)
           if placed then break end
         end
       end
@@ -5666,12 +5749,18 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     for _, m in pairs(melds) do
       if canExtend(m) then
         local wildsLeft5 = #wildCards - nextWild + 1
-        -- Wild melds: only extend if completing a wild book this turn, or black book goal met.
+        -- Wild melds: only add wilds when the combined pile will complete a 7-card book (Rule 1).
+        local combinedNow5 = 0
+        for _, wm in pairs(melds) do if wm.isWildMeld then combinedNow5 = combinedNow5 + wm.total end end
         local wildMeldOk = not m.isWildMeld
-                        or not needBlackBook
-                        or (m.total + wildsLeft5 >= 7)
+                        or (combinedNow5 < 7 and combinedNow5 + wildsLeft5 >= 7)
         local freePlace  = canEmptyWithWilds or canEmptyViaWildMeld or hasFoot
+        -- Rank melds require both suit-colors before a wild can form a valid black book.
+        -- Exempt when free-placing (hand-emptying foot-pickup): color correctness is secondary.
+        local mc5 = m.colors or {hasRed=false, hasBlack=false}
+        local colorOk5   = m.isWildMeld or freePlace or (mc5.hasRed and mc5.hasBlack)
         local eligible   = wildMeldOk
+                        and colorOk5
                         and postFootRankOk(m)
                         and (freePlace or not needBlackBook or (m.total + 1 >= 7))
         if eligible then table.insert(candidates, m) end
@@ -5712,9 +5801,11 @@ function buildTurnPlan(sColor)
   local melds = evalMeldsToPlay(state)
   if #melds == 0 then
     if not hasExistingMeldsOrBooks(state) then
-      local minimum = gi_OPENING_MELD_MIN[giHand] or 50
-      L(string.format("Natural melds: suppressed — opening minimum %d pts not met (hand %d)",
-        minimum, giHand))
+      local minimum   = gi_OPENING_MELD_MIN[giHand] or 50
+      local alreadyPts = alreadyPlayedOpeningPts(state)
+      L(string.format(
+        "Natural melds: suppressed — opening minimum %d pts not met (table %d + hand pts, hand %d)",
+        minimum, alreadyPts, giHand))
     else
       L("Natural melds: nothing eligible (need 3+ of a rank)")
     end
@@ -5781,11 +5872,21 @@ function buildTurnPlan(sColor)
   --   (b) end-game black-book build: foot already picked up, projected 2+ red books this
   --       turn but fewer than 2 black books — use wilds to convert existing red melds into
   --       black books regardless of hand size.
+  --   OR
+  --   (c) wild book completion: evalWildAllocations found a wild-meld alloc that completes
+  --       a 7-card wild book.  Wild books score 1500 pts; always complete them unless the
+  --       current plan already goes out without the wild plays.
   -- Wild cards are NEVER discarded unless all remaining cards are wild (evalDiscard rule 8).
   local needsBlackBooks = not state.hasFoot and projRed >= 2 and state.bookCounts.black < 2
+  -- Detect whether evalWildAllocations identified a wild book completion opportunity.
+  local wildBookAlloc = false
+  for _, wa in ipairs(wildAllocs) do
+    if wa.isWildMeld then wildBookAlloc = true; break end
+  end
   local allowWilds =
     ((projHandCount <= 1) and (not state.otherFootOnTable or goOut.should or state.hasFoot))
     or needsBlackBooks
+    or (wildBookAlloc and not goOut.should)   -- (c) wild book completion
 
   if not allowWilds then
     if #wildAllocs > 0 then
@@ -5804,6 +5905,9 @@ function buildTurnPlan(sColor)
     if needsBlackBooks and projHandCount > 1 then
       L(string.format("Wild plays: allowed — building black books (red=%d black=%d)",
         projRed, state.bookCounts.black))
+    end
+    if wildBookAlloc and not goOut.should and not needsBlackBooks and projHandCount > 1 then
+      L("Wild plays: allowed — completing wild book (1500 pts, independent of go-out)")
     end
     if #wildAllocs == 0 then
       if state.wildCount > 0 then L("Wild plays: no useful allocation found") end
@@ -6899,7 +7003,19 @@ function planLayoutRank(sColor, rank)
   end
 
   if (#handCards - #rankCards) < 2 then
-    return {ok=false, reason="Cannot play: would leave fewer than 2 cards in hand"}
+    -- Exception: allow the play when the player can go out this turn (2+ red books,
+    -- 2+ black books, foot already picked up).  The "keep 2 cards" rule exists to
+    -- ensure a discard is always possible, but it doesn't apply when going out.
+    local canGoOut = false
+    pcall(function()
+      local st = snapshotState(sColor)
+      canGoOut = not st.hasFoot
+                 and st.bookCounts.red   >= 2
+                 and st.bookCounts.black >= 2
+    end)
+    if not canGoOut then
+      return {ok=false, reason="Cannot play: would leave fewer than 2 cards in hand"}
+    end
   end
 
   local rotY = getPlayerRotY(sColor)
@@ -7030,10 +7146,11 @@ end
 --==============================================================================
 -- Lays out all eligible ranks from the player's hand, one rank at a time.
 -- A rank is eligible if the player holds 3+ non-wild cards of that rank.
-function layoutHandAll(sColor, skipRedThrees)
+-- skipOpeningCheck: pass true to bypass the opening meld minimum (e.g. from context menu).
+function layoutHandAll(sColor, skipRedThrees, skipOpeningCheck)
   -- Handle red 3s first; re-enter with skipRedThrees=true once done.
   if not skipRedThrees then
-    handleRedThrees(sColor, function() layoutHandAll(sColor, true) end)
+    handleRedThrees(sColor, function() layoutHandAll(sColor, true, skipOpeningCheck) end)
     return
   end
 
@@ -7047,23 +7164,26 @@ function layoutHandAll(sColor, skipRedThrees)
 
   -- Opening meld check: if the player hasn't opened yet, the COMBINED point value
   -- of all eligible ranks to be laid must meet the hand minimum.
-  local meldMin = openingMeldMinimum(sColor)
-  if meldMin > 0 then
-    local totalPts = 0
-    for _, rank in ipairs(eligible) do
-      local p = planLayoutRank(sColor, rank)
-      if p.ok then
-        for _, card in ipairs(p.cards) do
-          local _, r = cardDeets(card)
-          if r ~= "3" then totalPts = totalPts + scoreCard(card) end
+  -- Skipped when called from the right-click context menu (skipOpeningCheck=true).
+  if not skipOpeningCheck then
+    local meldMin = openingMeldMinimum(sColor)
+    if meldMin > 0 then
+      local totalPts = 0
+      for _, rank in ipairs(eligible) do
+        local p = planLayoutRank(sColor, rank)
+        if p.ok then
+          for _, card in ipairs(p.cards) do
+            local _, r = cardDeets(card)
+            if r ~= "3" then totalPts = totalPts + scoreCard(card) end
+          end
         end
       end
-    end
-    if totalPts < meldMin then
-      broadcastToColor(string.format(
-        "Opening meld must be worth at least %d pts (planned %d pts)",
-        meldMin, totalPts), sColor)
-      return
+      if totalPts < meldMin then
+        broadcastToColor(string.format(
+          "Opening meld must be worth at least %d pts (planned %d pts)",
+          meldMin, totalPts), sColor)
+        return
+      end
     end
   end
 
