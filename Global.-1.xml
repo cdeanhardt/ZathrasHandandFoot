@@ -225,16 +225,37 @@
                 onClick="click_PlanClose" />
     </Row>
     <Panel id="PlanResultSubPanel" class="SubPanel"
-           width="420" height="395"
+           width="420" height="420"
            rectAlignment="UpperLeft" offsetXY="0 -30"
            color="#bbbbbb">
+        <!-- Plan history nav: 1=most recent, 5=oldest -->
+        <Button id="btnPlanH1" active="false" text="1" width="20" height="16"
+                rectAlignment="UpperLeft" offsetXY="8 -8"
+                color="rgba(0,0,0,0)" textColor="#777777" fontSize="11"
+                onClick="click_PlanNav" />
+        <Button id="btnPlanH2" active="false" text="2" width="20" height="16"
+                rectAlignment="UpperLeft" offsetXY="30 -8"
+                color="rgba(0,0,0,0)" textColor="#777777" fontSize="11"
+                onClick="click_PlanNav" />
+        <Button id="btnPlanH3" active="false" text="3" width="20" height="16"
+                rectAlignment="UpperLeft" offsetXY="52 -8"
+                color="rgba(0,0,0,0)" textColor="#777777" fontSize="11"
+                onClick="click_PlanNav" />
+        <Button id="btnPlanH4" active="false" text="4" width="20" height="16"
+                rectAlignment="UpperLeft" offsetXY="74 -8"
+                color="rgba(0,0,0,0)" textColor="#777777" fontSize="11"
+                onClick="click_PlanNav" />
+        <Button id="btnPlanH5" active="false" text="5" width="20" height="16"
+                rectAlignment="UpperLeft" offsetXY="96 -8"
+                color="rgba(0,0,0,0)" textColor="#777777" fontSize="11"
+                onClick="click_PlanNav" />
         <InputField id="PlanResultText"
                     text=""
                     fontSize="12"
                     lineType="MultiLineNewline"
                     interactable="true"
-                    width="400" height="270"
-                    rectAlignment="UpperCenter" offsetXY="0 -8"
+                    width="400" height="265"
+                    rectAlignment="UpperCenter" offsetXY="0 -30"
                     colors="#FFFFFF|#FFFFFF|#FFFFFF|#FFFFFF"
                     textColor="#000000"
                     readOnly="true" />

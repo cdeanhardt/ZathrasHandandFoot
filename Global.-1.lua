@@ -713,6 +713,10 @@ end
 -- Stored  plan from the last click_ActionPlan call; held so click_PlanExecute can use it.
 gPlanResult = nil
 
+-- Rolling history of the last 5 plan display strings (index 1 = most recent).
+gPlanHistory    = {}
+gPlanHistoryIdx = 1   -- which history slot is currently shown in the panel
+
 -- Wait ID for the auto-exec countdown; non-nil while a countdown is running.
 gAutoExecWaitId  = nil
 -- Tracks the Auto Exec toggle state; set by click_ToggleAutoExec.
@@ -903,15 +907,50 @@ function planDisplayText(plan)
   return text
 end
 
+-- Refresh the 5 history nav buttons to reflect the current history size and selection.
+local function updatePlanNavButtons()
+  for i = 1, 5 do
+    local id = "btnPlanH" .. i
+    if i <= #gPlanHistory then
+      UI.setAttribute(id, "active", "true")
+      if i == gPlanHistoryIdx then
+        -- Currently selected: highlighted
+        UI.setAttribute(id, "color",     "rgba(0.25,0.25,0.45,0.75)")
+        UI.setAttribute(id, "textColor", "#FFFFFF")
+      else
+        -- Available history: dim
+        UI.setAttribute(id, "color",     "rgba(0,0,0,0)")
+        UI.setAttribute(id, "textColor", "#666666")
+      end
+    else
+      UI.setAttribute(id, "active", "false")
+    end
+  end
+end
+
+-- Called when a history nav button (btnPlanH1–btnPlanH5) is clicked.
+function click_PlanNav(player, value, id)
+  local idx = id and tonumber(id:match("btnPlanH(%d+)"))
+  if not idx or idx < 1 or idx > #gPlanHistory then return end
+  gPlanHistoryIdx = idx
+  UI.setAttribute("PlanResultText", "text", gPlanHistory[idx])
+  updatePlanNavButtons()
+end
+
 -- Populate and show the PlanResultPanel with a composed plan result.
 -- Starts the auto-exec countdown if the Auto Exec toggle is on.
 -- Uses a shorter 3-6 s window when the player has no melds on the table yet
 -- (less to read), and the normal 5-8 s window once melds are established.
 function showPlanPanel(plan)
   UI.setAttribute("progressBarFill", "width", "0")
-  UI.setAttribute("PlanResultText", "text", planDisplayText(plan))
+  local displayText = planDisplayText(plan)
+  table.insert(gPlanHistory, 1, displayText)
+  if #gPlanHistory > 5 then gPlanHistory[6] = nil end
+  gPlanHistoryIdx = 1
+  UI.setAttribute("PlanResultText", "text", displayText)
   Wait.time(function()
     UI.setAttribute("PlanResultPanel", "active", "true")
+    updatePlanNavButtons()
     if gAutoExecEnabled then
       local state   = plan and plan.state
       local noMelds = not state or #state.melds == 0
@@ -4577,7 +4616,7 @@ local function alreadyPlayedOpeningPts(state)
   local RANK_PTS = {
     ["Joker"]=50, ["2"]=20,  ["A"]=20,
     ["K"]=10, ["Q"]=10, ["J"]=10, ["10"]=10,
-    ["9"]=5,  ["8"]=5,  ["7"]=5,  ["6"]=5, ["5"]=5, ["4"]=5,
+    ["9"]=10, ["8"]=10, ["7"]=5,  ["6"]=5, ["5"]=5, ["4"]=5,
   }
   local total = 0
   for rank, meld in pairs(state.meldsByRank) do
@@ -4889,41 +4928,19 @@ function evalMeldsToPlay(state)
     return a.count > b.count
   end)
 
-  -- Opening meld check: if the player has no existing natural melds or books, the
-  -- combined point value of (a) cards already on the table in wild/black melds plus
-  -- (b) planned natural meld cards must meet the hand's minimum threshold.
-  -- Wild meld cards count at full value (2s=20 pts, Jokers=50 pts).
-  -- Exclude red-3 stacks (rank "3") — they are not real melds for opening purposes.
-  if not hasExistingMeldsOrBooks(state) then
-    local minimum  = gi_OPENING_MELD_MIN[giHand] or 50
-    local totalPts = alreadyPlayedOpeningPts(state)   -- seed with already-played value
-    for _, plan in ipairs(plans) do
-      for _, card in ipairs(plan.cards) do
-        if card.rank ~= "3" then   -- red 3s never count toward opening minimum
-          totalPts = totalPts + scoreCard(card.obj)
-        end
-      end
-    end
-    if totalPts < minimum then
-      return {}
-    end
-  end
+  -- Opening minimum check moved to buildTurnPlan (after evalWildAllocations), where the
+  -- actual allocated wild cards are known.  Wild cards count only when they are truly
+  -- played this turn — which depends on the pre-foot suppression logic in evalWildAllocations.
 
   return plans
 end
 
--- Strata for eligible ranks (4-7=1, 8-K=2, A=3).
--- Lower strata = discard sooner.
-local gt_DISCARD_STRATA = {
-  ["4"]=1,["5"]=1,["6"]=1,["7"]=1,
-  ["8"]=2,["9"]=2,["10"]=2,["J"]=2,["Q"]=2,["K"]=2,
-  ["A"]=3,
-}
--- Rank ordering within a strata for tiebreaker (higher = discard first).
-local gt_RANK_WITHIN_STRATA = {
-  ["4"]=1,["5"]=2,["6"]=3,["7"]=4,
-  ["8"]=1,["9"]=2,["10"]=3,["J"]=4,["Q"]=5,["K"]=6,
-  ["A"]=1,
+-- Absolute discard rank value: lowest = discard first, Ace is high (last to go).
+-- Primary sort is by copy-count in hand (singletons before pairs, pairs before triples, etc.);
+-- this value is the tiebreaker when counts are equal.
+local gt_DISCARD_RANK_VALUE = {
+  ["4"]=1, ["5"]=2, ["6"]=3, ["7"]=4,
+  ["8"]=5, ["9"]=6, ["10"]=7, ["J"]=8, ["Q"]=9, ["K"]=10, ["A"]=11,
 }
 
 -- What card to discard after planned melds? Returns {card=entry_or_nil, reason=string}
@@ -5089,34 +5106,20 @@ function evalDiscard(state, meldPlan, wildAllocs)
     local groups = {}
     for _, g in pairs(byRank) do table.insert(groups, g) end
 
-    -- RULE 4: Strata is the primary filter — lowest strata discarded first.
-    -- Aces (strata 3) are always held over 8–K (strata 2) and 4–7 (strata 1),
-    -- even if the Ace is a singleton.  Wilds are handled separately (fallback only).
-    local minStrata = math.huge
-    for _, g in ipairs(groups) do
-      local s = gt_DISCARD_STRATA[g.rank] or 2
-      if s < minStrata then minStrata = s end
-    end
-    local atMinStrata = {}
-    for _, g in ipairs(groups) do
-      if (gt_DISCARD_STRATA[g.rank] or 2) == minStrata then
-        table.insert(atMinStrata, g)
-      end
-    end
-
-    -- RULE 3: Within the lowest strata, prefer ranks with fewest copies in hand.
+    -- RULE 3: Fewest copies in hand first — discard a singleton before a pair,
+    -- a pair before a triple, etc.  Copy-count is the primary sort key.
     local minCount = math.huge
-    for _, g in ipairs(atMinStrata) do
+    for _, g in ipairs(groups) do
       if #g.cards < minCount then minCount = #g.cards end
     end
     local atMinCount = {}
-    for _, g in ipairs(atMinStrata) do
+    for _, g in ipairs(groups) do
       if #g.cards == minCount then table.insert(atMinCount, g) end
     end
 
-    -- RULE 7: Lowest rank within strata/count wins.
+    -- RULE 7: Within the same copy-count, lowest absolute rank value wins (Ace is high).
     table.sort(atMinCount, function(a, b)
-      return (gt_RANK_WITHIN_STRATA[a.rank] or 0) < (gt_RANK_WITHIN_STRATA[b.rank] or 0)
+      return (gt_DISCARD_RANK_VALUE[a.rank] or 0) < (gt_DISCARD_RANK_VALUE[b.rank] or 0)
     end)
     local chosen = atMinCount[1]
 
@@ -5132,9 +5135,9 @@ function evalDiscard(state, meldPlan, wildAllocs)
     end
 
     local reason = string.format(
-      "%s — strata=%d count=%d rank-slot=%d%s",
-      chosen.rank, minStrata, minCount,
-      gt_RANK_WITHIN_STRATA[chosen.rank] or 0,
+      "%s — count=%d rank-value=%d%s",
+      chosen.rank, minCount,
+      gt_DISCARD_RANK_VALUE[chosen.rank] or 0,
       tag or "")
     return {card=pick, reason=reason}
   end
@@ -5304,6 +5307,20 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     end
   end)
 
+  -- Count all eligible-rank meld piles (open + books) across opponents for pressure detection.
+  local otherMelds = 0
+  pcall(function()
+    for _, color in ipairs(playerList or {}) do
+      if color ~= state.color then
+        for _, m in ipairs(getMelds(color)) do
+          if isEligibleRank(m.rank) then otherMelds = otherMelds + 1 end
+        end
+      end
+    end
+  end)
+  -- Opponent pressure: opponent has built 3+ melds while we haven't picked up our foot yet.
+  local opponentPressure = hasFoot and (otherMelds >= 3)
+
   -- How many wild-assisted pair melds are acceptable when emptying the hand to pick up the
   -- foot.  Scales with game pressure from the other player(s):
   --   otherFoot=true  (other still has foot on table)  → conservative: 1 pair
@@ -5316,7 +5333,7 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
   elseif otherFoot then
     emptyHandCap = 1                -- other player not yet in foot: be conservative
   else
-    emptyHandCap = (otherBooks >= 3) and 3 or 2
+    emptyHandCap = (otherMelds >= 3) and 3 or 2
   end
 
   -- Check if playing pair melds (up to emptyHandCap) + remaining wilds as wild meld
@@ -5366,6 +5383,27 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
       " wilds + 1 pair → wild meld + mixed meld")
   end
 
+  -- Under opponent pressure (3+ opponent melds, pre-foot): check if ALL wilds going to rank meld
+  -- pairs (no wild meld reserved) would empty the hand this turn for foot pickup.
+  local canEmptyViaPressure = false
+  if hasFoot and opponentPressure then
+    local meldNaturals = 0
+    for _, m in ipairs(meldPlan) do meldNaturals = meldNaturals + m.count end
+    local eligiblePairCount = 0
+    for rank, count in pairs(state.handByRank) do
+      if isEligibleRank(rank) and count == 2 and not melds[rank] and not redBookRanks[rank] then
+        eligiblePairCount = eligiblePairCount + 1
+      end
+    end
+    local pairsUsed = math.min(eligiblePairCount, state.wildCount)
+    local totalPlayable = meldNaturals + pairsUsed * 3  -- 2 naturals + 1 wild per pair
+    canEmptyViaPressure = (state.handCount - totalPlayable <= 1)
+    if canEmptyViaPressure then
+      L(string.format("canEmptyViaPressure: opponent has %d melds, %d naturals + %d pairs×3 = %d of %d",
+        otherMelds, meldNaturals, pairsUsed, totalPlayable, state.handCount))
+    end
+  end
+
   -- Suppress wild plays on RANK melds when fewer than 2 red books are projected.
   -- Adding wilds to natural melds converts them to black melds, making it harder
   -- to build a 2nd red book.  Exception: hand-emptying plays for foot pickup.
@@ -5397,6 +5435,21 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
   end
   if canCompleteWildBook and not hasFoot and projRedVal < 2 then
     L("Wild plays: wild book completion allowed (independent of red book count)")
+  end
+
+  -- Pre-foot: hold all wilds unless plays this turn can empty the hand for foot pickup,
+  -- or an existing wild meld pile can be completed this turn (1500-pt book).
+  -- This prevents committing wilds to a new wild meld pile on turns where it doesn't
+  -- contribute to picking up the foot.
+  if hasFoot and not canEmptyWithWilds and not canEmptyViaWildMeld
+             and not canEmptyViaPressure and not canCompleteWildBook then
+    if state.wildCount > 0 then
+      L("Wild plays: held pre-foot — saving wilds for foot pickup and future wild meld")
+    end
+    return {}
+  end
+  if hasFoot and canCompleteWildBook then
+    L("Wild plays: wild book completion allowed pre-foot (completes 1500-pt book this turn)")
   end
 
   -- Gather wilds: 2s before Jokers
@@ -5509,11 +5562,13 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
   -- canEmptyViaWildMeld: foot on table, 4+ wilds, 1 pair → exactly 1 wild, cap = 1.
   -- canEmptyWithWilds: emptying hand with up to emptyHandCap pairs is beneficial.
   -- Pairs are processed highest-rank first so the cap trims low-value pairs, not high ones.
-  local phase1Allowed = canEmptyViaWildMeld or canEmptyWithWilds or
+  local phase1Allowed = canEmptyViaWildMeld or canEmptyWithWilds or canEmptyViaPressure or
                         ((not hasFoot or not otherFoot) and not needBlackBook)
   local phase1Cap
   if canEmptyViaWildMeld then
     phase1Cap = 1
+  elseif canEmptyViaPressure then
+    phase1Cap = state.wildCount     -- all wilds available; no reserve for wild meld under pressure
   elseif canEmptyWithWilds then
     phase1Cap = emptyHandCap        -- use same cap that made canEmptyWithWilds true
   elseif hasFoot and not otherFoot then
@@ -5541,6 +5596,8 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
       melds[rank] = {rank=rank, obj=nil, total=2, wilds=0, isNew=true, isWildMeld=false, naturals=naturalCards}
       local label = canEmptyViaWildMeld
         and string.format("new black meld: 2 × %s + 1 wild (wild+pair empty hand)", rank)
+        or canEmptyViaPressure
+          and string.format("new black meld: 2 × %s + 1 wild (opponent pressure %d melds, %d/%d)", rank, otherMelds, phase1Count+1, phase1Cap)
         or  (hasFoot and not otherFoot)
           and string.format("new black meld: 2 × %s + 1 wild (foot-pickup play, %d/2)", rank, phase1Count+1)
           or  string.format("new black meld: 2 × %s + 1 wild (hand pair)", rank)
@@ -5549,9 +5606,11 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     end
   end
 
-  -- Phases 2 and 3 are skipped when emptying the hand (canEmptyViaWildMeld or
+  -- Phases 2 and 3 are skipped when emptying the hand via wild meld (canEmptyViaWildMeld or
   -- canEmptyWithWilds) so remaining wilds flow directly to the Phase 4 wild meld.
-  if not canEmptyViaWildMeld and not canEmptyWithWilds then
+  -- Exception: under opponent pressure (canEmptyViaPressure), all wilds go to rank melds
+  -- instead of a wild meld — phases 2/3 must run even when canEmptyWithWilds is true.
+  if (not canEmptyViaWildMeld and not canEmptyWithWilds) or canEmptyViaPressure then
     -- Phase 2: pre-existing melds on table (obj ~= nil).
     -- Normal (not needBlackBook): 1 wild each.
     -- needBlackBook: concentrate all wilds needed to COMPLETE one meld at a time (sorted
@@ -5711,8 +5770,10 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
 
   -- Phase 4: if 3+ wilds still unallocated and no wild meld exists on the table,
   -- bundle them into a new pure wild meld.
+  -- Suppressed under opponent pressure pre-foot: all wilds went to rank melds (phases 1-3).
   local wildsLeft4 = #wildCards - nextWild + 1
-  if wildsLeft4 >= 3 and not melds["2"] and not melds["Joker"] then
+  local allowPhase4 = not (hasFoot and opponentPressure)
+  if wildsLeft4 >= 3 and not melds["2"] and not melds["Joker"] and allowPhase4 then
     local assigned = {}
     while nextWild <= #wildCards do
       table.insert(assigned, wildCards[nextWild])
@@ -5749,12 +5810,16 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
     for _, m in pairs(melds) do
       if canExtend(m) then
         local wildsLeft5 = #wildCards - nextWild + 1
-        -- Wild melds: only add wilds when the combined pile will complete a 7-card book (Rule 1).
+        -- Wild melds: existing pile (obj ~= nil) can always absorb a leftover wild — a lone wild
+        -- belongs on the wild meld rather than converting a rank meld to black.  New wild meld
+        -- (obj==nil, created by Phase 4): only add when it would complete the book (Phase 4
+        -- consumed all wilds, so this case rarely arises in Phase 5 anyway).
         local combinedNow5 = 0
         for _, wm in pairs(melds) do if wm.isWildMeld then combinedNow5 = combinedNow5 + wm.total end end
         local wildMeldOk = not m.isWildMeld
-                        or (combinedNow5 < 7 and combinedNow5 + wildsLeft5 >= 7)
-        local freePlace  = canEmptyWithWilds or canEmptyViaWildMeld or hasFoot
+                        or (m.obj ~= nil and combinedNow5 < 7)         -- existing wild meld with room
+                        or (m.obj == nil and combinedNow5 < 7 and combinedNow5 + wildsLeft5 >= 7)
+        local freePlace  = canEmptyWithWilds or canEmptyViaWildMeld or canEmptyViaPressure or not hasFoot
         -- Rank melds require both suit-colors before a wild can form a valid black book.
         -- Exempt when free-placing (hand-emptying foot-pickup): color correctness is secondary.
         local mc5 = m.colors or {hasRed=false, hasBlack=false}
@@ -5767,7 +5832,14 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
       end
     end
     if #candidates == 0 then break end
-    table.sort(candidates, function(a, b) return a.total < b.total end)
+    -- Prefer existing wild meld over rank melds: a leftover wild belongs on the wild meld pile
+    -- rather than converting a red rank meld to black.  Among same type, fewest cards first.
+    table.sort(candidates, function(a, b)
+      local aExWild = a.isWildMeld and a.obj ~= nil
+      local bExWild = b.isWildMeld and b.obj ~= nil
+      if aExWild ~= bExWild then return aExWild end
+      return a.total < b.total
+    end)
     local placed = false
     for _, m in ipairs(candidates) do
       if canExtend(m) then
@@ -5799,21 +5871,7 @@ function buildTurnPlan(sColor)
   L(string.format("Go out: %s — %s", goOut.should and "YES" or "no", goOut.reason))
 
   local melds = evalMeldsToPlay(state)
-  if #melds == 0 then
-    if not hasExistingMeldsOrBooks(state) then
-      local minimum   = gi_OPENING_MELD_MIN[giHand] or 50
-      local alreadyPts = alreadyPlayedOpeningPts(state)
-      L(string.format(
-        "Natural melds: suppressed — opening minimum %d pts not met (table %d + hand pts, hand %d)",
-        minimum, alreadyPts, giHand))
-    else
-      L("Natural melds: nothing eligible (need 3+ of a rank)")
-    end
-  else
-    for _, m in ipairs(melds) do
-      L(string.format("  [p%d] %s — %s", m.priority, m.rank, m.reason))
-    end
-  end
+  local hadMeldPlans = (#melds > 0)
 
   -- Projected red book count from natural meld plays only (used to gate wild allocation).
   local projRedFromMelds = state.bookCounts.red
@@ -5823,17 +5881,69 @@ function buildTurnPlan(sColor)
 
   -- Compute wild allocs now (needed for go-out projection), but only keep them
   -- if the plan actually results in going out this turn.
+  local preWildAllocLogLen = #log
   local wildAllocs = evalWildAllocations(state, melds, L, projRedFromMelds)
+
+  -- Combined opening minimum check: verify that natural-meld points + actually-allocated
+  -- wild points together meet the hand's opening minimum.  This runs after evalWildAllocations
+  -- so we know which wilds are truly played (pre-foot wilds may be held/suppressed).
+  -- Only fires when natural plans existed AND the player hasn't opened yet.
+  if hadMeldPlans and not hasExistingMeldsOrBooks(state) then
+    local minimum  = gi_OPENING_MELD_MIN[giHand] or 50
+    local totalPts = alreadyPlayedOpeningPts(state)
+    for _, m in ipairs(melds) do
+      for _, card in ipairs(m.cards) do
+        if card.rank ~= "3" then totalPts = totalPts + scoreCard(card.obj) end
+      end
+    end
+    for _, wa in ipairs(wildAllocs) do
+      for _, card in ipairs(wa.wilds) do totalPts = totalPts + scoreCard(card.obj) end
+      for _, card in ipairs(wa.naturalCards) do
+        if card.rank ~= "3" then totalPts = totalPts + scoreCard(card.obj) end
+      end
+    end
+    if totalPts < minimum then
+      -- Truncate log entries added by the first evalWildAllocations run, then suppress.
+      while #log > preWildAllocLogLen do table.remove(log) end
+      melds = {}
+      projRedFromMelds = state.bookCounts.red
+      wildAllocs = evalWildAllocations(state, {}, L, projRedFromMelds)
+      L(string.format(
+        "Natural melds: suppressed — opening minimum %d pts not met (combined %d pts, hand %d)",
+        minimum, totalPts, giHand))
+    end
+  end
+
+  -- Log melds (after potential opening minimum suppression).
+  if #melds == 0 then
+    if hadMeldPlans then
+      -- already logged the suppression reason above
+    elseif not hasExistingMeldsOrBooks(state) then
+      L("Natural melds: nothing eligible (need 3+ of a rank, opening minimum not met)")
+    else
+      L("Natural melds: nothing eligible (need 3+ of a rank)")
+    end
+  else
+    for _, m in ipairs(melds) do
+      L(string.format("  [p%d] %s — %s", m.priority, m.rank, m.reason))
+    end
+  end
 
   -- Projected book counts and remaining hand size after all planned plays.
   local projRed   = state.bookCounts.red
   local projBlack = state.bookCounts.black
+  -- Ranks already credited as a black book via the meld plan (priority==2 means the natural
+  -- cards from hand complete the book once a wild is also added).  Guard against double-counting
+  -- when the wild alloc for the same rank also has completesBook=true.
+  local p2Ranks = {}
   for _, m in ipairs(melds) do
     if m.priority == 1 then projRed   = projRed   + 1 end  -- completes red book
-    if m.priority == 2 then projBlack = projBlack + 1 end  -- completes black book (naturals into wild meld)
+    if m.priority == 2 then projBlack = projBlack + 1; p2Ranks[m.rank] = true end
   end
   for _, wa in ipairs(wildAllocs) do
-    if wa.completesBook then projBlack = projBlack + 1 end  -- wild completion → black book
+    if wa.completesBook and not p2Ranks[wa.rank] then
+      projBlack = projBlack + 1  -- wild completion → black book (not already counted via meld plan)
+    end
   end
 
   local cardsConsumed = 0
@@ -7650,7 +7760,7 @@ function onObjectSpawn(obj)
     if obj.tag == "Card" then
       obj.addContextMenuItem('Layout Hand', function(playerColor)
         local _, rank, _ = cardDeets(obj)
-        layoutHandRank(playerColor, rank)
+        layoutHandRank(playerColor, rank, false, true)
       end, false)
     end
 end
