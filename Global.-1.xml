@@ -211,7 +211,6 @@
 <Panel id="PlanResultPanel" active="false"
        width="420" height="30"
        rectAlignment="MiddleCenter"
-       showAnimation="Grow" hideAnimation="Shrink"
        returnToOriginalPositionWhenReleased="false" allowDragging="true"
        color="#bbbbbb00"
        visibility="White">
