@@ -492,17 +492,19 @@ function triggerAutodraw(sColor)
   end, drawDelay + 1.5)
 
   -- After second deal fires, poll until both cards register (or 4 s timeout),
-  -- then handle red 3s → sort → plan.  This prevents sortHand from running
-  -- before newly dealt cards appear in getHandObjects().
+  -- then sort → handle red 3s → sort again → plan.
   Wait.time(function()
     waitForHandGrowth(sColor, preCount + 2, 4.0, function()
-      handleRedThrees(sColor, function()
-        pcall(function() sortHand(nil, sColor) end)
-        Wait.time(function()
-          gPlanResult = buildTurnPlan(sColor)
-          showPlanPanel(gPlanResult)
-        end, 0.75)
-      end)
+      pcall(function() sortHand(nil, sColor) end)
+      Wait.time(function()
+        handleRedThrees(sColor, function()
+          pcall(function() sortHand(nil, sColor) end)
+          Wait.time(function()
+            gPlanResult = buildTurnPlan(sColor)
+            showPlanPanel(gPlanResult)
+          end, 0.75)
+        end)
+      end, 0.5)
     end)
   end, drawDelay + 0.6)
 end
@@ -570,31 +572,33 @@ function click_ActionDrawSortPlayLay(player)
     Wait.time(function() pcall(function() mainDeck.deal(1, sColor) end) end, 0.5)
   end
 
-  -- Poll until both cards register (or 4 s timeout), then handle red 3s and continue.
+  -- Poll until both cards register (or 4 s timeout),
+  -- then sort → handle red 3s → sort again → play hand.
   Wait.time(function()
     waitForHandGrowth(sColor, preCount + 2, 4.0, function()
-      handleRedThrees(sColor, function()
-        -- Sort is synchronous — runs immediately after red 3s are cleared.
-        pcall(function() sortHand(nil, sColor) end)
-
-        -- Brief pause for sort to visually complete, then play hand.
-        Wait.time(function()
-          local playPlan = planAutoPlay(sColor)
-          local playDuration = 0
-          if playPlan.ok then
-            executeAutoPlay(sColor, playPlan)
-            for _, move in ipairs(playPlan.moves) do
-              playDuration = playDuration + (#move.cards * 0.75) + 0.75
-            end
-          end
-
-          -- Layout all eligible ranks after play finishes.
+      pcall(function() sortHand(nil, sColor) end)
+      Wait.time(function()
+        handleRedThrees(sColor, function()
+          pcall(function() sortHand(nil, sColor) end)
+          -- Brief pause for sort to visually complete, then play hand.
           Wait.time(function()
-            layoutHandAll(sColor, true)
-          end, playDuration + 0.5)
+            local playPlan = planAutoPlay(sColor)
+            local playDuration = 0
+            if playPlan.ok then
+              executeAutoPlay(sColor, playPlan)
+              for _, move in ipairs(playPlan.moves) do
+                playDuration = playDuration + (#move.cards * 0.75) + 0.75
+              end
+            end
 
-        end, 0.5)
-      end)
+            -- Layout all eligible ranks after play finishes.
+            Wait.time(function()
+              layoutHandAll(sColor, true)
+            end, playDuration + 0.5)
+
+          end, 0.5)
+        end)
+      end, 0.5)
     end)
   end, 0.6)
 end
@@ -664,14 +668,20 @@ function click_ActionDraw(player)
     end)
   end, 1.5)
 
-  -- Poll until both cards register (or 4 s timeout), then sort.
+  -- Poll until both cards register (or 4 s timeout),
+  -- then sort → handle red 3s → sort again → update discard button.
   Wait.time(function()
     waitForHandGrowth(sColor, preCount + 2, 4.0, function()
-      handleRedThrees(sColor, function()
-        Wait.time(function() sortHand(nil, sColor) end, 0.5)
-        -- After sort settles, compute and display the suggested discard.
-        Wait.time(function() updateDiscardButton(sColor) end, 1.5)
-      end)
+      pcall(function() sortHand(nil, sColor) end)
+      Wait.time(function()
+        handleRedThrees(sColor, function()
+          Wait.time(function()
+            pcall(function() sortHand(nil, sColor) end)
+            -- After sort settles, compute and display the suggested discard.
+            Wait.time(function() updateDiscardButton(sColor) end, 1.0)
+          end, 0.5)
+        end)
+      end, 0.5)
     end)
   end, 0.6)
 end
@@ -956,22 +966,20 @@ function showPlanPanel(plan)
   if #gPlanHistory > 5 then gPlanHistory[6] = nil end
   gPlanHistoryIdx = 1
   UI.setAttribute("PlanResultText", "text", displayText)
-  Wait.time(function()
-    UI.setAttribute("PlanResultPanel", "active", "true")
-    updatePlanNavButtons()
-    if gAutoExecEnabled then
-      local state   = plan and plan.state
-      local noMelds = not state or #state.melds == 0
-      local hasFoot = state and state.hasFoot  -- true = foot pile still on table
-      if noMelds or hasFoot then
-        -- Before first meld, or melds exist but foot not yet picked up
-        startAutoExecTimer(2, 4)
-      else
-        -- After foot has been picked up
-        startAutoExecTimer(5, 8)
-      end
+  UI.setAttribute("PlanResultPanel", "active", "true")
+  updatePlanNavButtons()
+  if gAutoExecEnabled then
+    local state   = plan and plan.state
+    local noMelds = not state or #state.melds == 0
+    local hasFoot = state and state.hasFoot  -- true = foot pile still on table
+    if noMelds or hasFoot then
+      -- Before first meld, or melds exist but foot not yet picked up
+      startAutoExecTimer(2, 4)
+    else
+      -- After foot has been picked up
+      startAutoExecTimer(5, 8)
     end
-  end, 0.05)
+  end
 end
 
 -- Build the turn plan, populate the result panel, and show it.
@@ -4910,10 +4918,6 @@ function evalMeldsToPlay(state)
               meldColor, existingCount, count, projected)
           end
         elseif existing then
-          -- Skip completed books — adding cards to a finished 7-card book has no game value.
-          if existing.isBook then
-            skip = true
-          end
           -- Include embedded wilds — same reasoning as the book-completion branch above.
           local existingWilds = countMeldWilds(existing.obj) + (existing.embeddedWilds or 0)
           meldColor = (existingWilds > 0) and "black" or "red"
@@ -4935,7 +4939,8 @@ function evalMeldsToPlay(state)
                 existingCount, count)
             end
           else
-            priority = 3
+            -- p5 for completed books (hand reduction toward go-out); p3 for open melds.
+            priority = existing.isBook and 5 or 3
             local target = existing.isBook and (meldColor .. " book") or (meldColor .. " meld")
             reason = string.format("extends %s: %d on table + %d from hand",
               target, existingCount, count)
@@ -5427,7 +5432,9 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
     for _, m in ipairs(meldPlan) do meldNaturals = meldNaturals + m.count end
     local eligiblePairCount = 0
     for rank, count in pairs(state.handByRank) do
-      if isEligibleRank(rank) and count == 2 and not melds[rank] and not redBookRanks[rank] then
+      -- redBookRanks is excluded only from EXTENDING existing books (wilds would convert red→black).
+      -- Phase 1 creates a NEW meld of the same rank, so red-book ranks are eligible here.
+      if isEligibleRank(rank) and count == 2 and not melds[rank] then
         eligiblePairCount = eligiblePairCount + 1
       end
     end
@@ -5471,7 +5478,8 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
     for _, m in ipairs(meldPlan) do meldNaturals = meldNaturals + m.count end
     local eligiblePairCount = 0
     for rank, count in pairs(state.handByRank) do
-      if isEligibleRank(rank) and count == 2 and not melds[rank] and not redBookRanks[rank] then
+      -- Phase 1 creates a NEW meld — red-book ranks are eligible as pairs here.
+      if isEligibleRank(rank) and count == 2 and not melds[rank] then
         eligiblePairCount = eligiblePairCount + 1
       end
     end
@@ -5827,6 +5835,9 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
           if na ~= nb then return na < nb end
           return ma.total > mb.total  -- tiebreak: more existing cards first
         end)
+        -- Track how many black books Phase 2 projects so we stop at 2.
+        -- Wild books (isWildMeld) are not counted against this limit.
+        local projBlackPhase2 = 0
         for _, rank in ipairs(preExisting) do
           if nextWild > #wildCards then break end
           local m = melds[rank]
@@ -5847,11 +5858,18 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
               addedToWild = addedToWild + 1
             end
           elseif not m.isWildMeld and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk then
+            -- Cap at 2 projected black books: making more black books wastes wilds that could
+            -- go into a wild meld, and extra black books don't help reach go-out sooner.
+            if state.bookCounts.black + projBlackPhase2 >= 2 then
+              L(string.format("  [p2-skip] %s — 2 black books already projected, skipping extra", rank))
+              break
+            end
             -- Assign all wilds needed to complete this black rank book.
             while nextWild <= #wildCards and canExtend(m) and m.total < 7 do
               assignWild(rank, 2,
                 string.format("completes black book %s (%d → 7)", rank, m.total))
             end
+            projBlackPhase2 = projBlackPhase2 + 1
           end
         end
       else
@@ -6105,6 +6123,40 @@ function buildTurnPlan(sColor)
     end
   end
 
+  -- Second-pass natural plays: if a wild alloc just completed a book for rank R, and
+  -- the hand still contains naturals of rank R that evalMeldsToPlay suppressed (because
+  -- adding them alone would have completed a red book and more black books were needed),
+  -- those naturals can now be played as p5 (extending the newly-completed black book).
+  -- This enables the combined "natural + wild → black book" go-out sequence.
+  for _, wa in ipairs(wildAllocs) do
+    if wa.completesBook and not wa.isWildMeld and wa.rank ~= "__wild__" then
+      local rank = wa.rank
+      local handCount = state.handByRank[rank] or 0
+      if handCount > 0 then
+        local alreadyInMelds = false
+        for _, m in ipairs(melds) do
+          if m.rank == rank then alreadyInMelds = true; break end
+        end
+        if not alreadyInMelds then
+          local cards = {}
+          for _, card in ipairs(state.hand) do
+            if card.rank == rank then table.insert(cards, card) end
+          end
+          if #cards > 0 then
+            table.insert(melds, {
+              rank=rank, cards=cards, count=#cards,
+              existingCount=7,   -- wild will have completed the meld to 7 before execution
+              priority=5,
+              meldColor="black",
+              reason=string.format("extends black book (wild completes meld first): %d from hand", #cards),
+              partial=false,
+            })
+          end
+        end
+      end
+    end
+  end
+
   -- Log melds (after potential opening minimum suppression).
   if #melds == 0 then
     if hadMeldPlans then
@@ -6240,9 +6292,23 @@ function buildTurnPlan(sColor)
         local i = 1
         while proj2 < 2 and i <= #wildAllocs do
           local wa = wildAllocs[i]
-          proj2 = proj2 + #wa.wilds + #wa.naturalCards
-          L(string.format("Wild alloc pruned (hand too small): %s", wa.rank))
-          table.remove(wildAllocs, i)
+          local toFree = 2 - proj2
+          -- New wild meld allocs (not completing a book) can be trimmed rather than removed
+          -- entirely: leave the minimum 3-card new meld intact and free only what's needed.
+          -- This preserves a smaller wild meld rather than discarding all the wilds.
+          local minWilds = 3   -- minimum cards for a valid new wild meld
+          local canTrim  = wa.isWildMeld and wa.isNew and not wa.completesBook
+                        and (#wa.wilds - toFree >= minWilds)
+          if canTrim then
+            for k = 1, toFree do table.remove(wa.wilds, #wa.wilds) end
+            wa.reason = wa.reason .. string.format(" (trimmed to %d)", #wa.wilds)
+            L(string.format("Wild meld trimmed to %d wilds (hand too small)", #wa.wilds))
+            proj2 = proj2 + toFree
+          else
+            proj2 = proj2 + #wa.wilds + #wa.naturalCards
+            L(string.format("Wild alloc pruned (hand too small): %s", wa.rank))
+            table.remove(wildAllocs, i)
+          end
         end
       end
       -- Step 2: prune non-book-completing melds (p3 / p4) if still short
@@ -6277,6 +6343,25 @@ function buildTurnPlan(sColor)
     for _, wa in ipairs(wildAllocs) do
       local displayRank2 = (wa.isWildMeld or wa.rank == "__wild__") and "wild-meld" or wa.rank
       L(string.format("  [w%d] %s — %s (recomputed after pruning)", wa.priority, displayRank2, wa.reason))
+    end
+
+    -- The recomputed wildAllocs may consume cards that the pruning step had freed,
+    -- pulling projHandCount back below 2 without a go-out.  Re-run the size guard.
+    if not goOut.should then
+      local consumed3 = 0
+      for _, m  in ipairs(melds)      do consumed3 = consumed3 + m.count                    end
+      for _, wa in ipairs(wildAllocs) do consumed3 = consumed3 + #wa.wilds + #wa.naturalCards end
+      local proj3 = state.handCount - consumed3
+      if proj3 < 2 then
+        table.sort(wildAllocs, function(a, b) return a.priority > b.priority end)
+        local i = 1
+        while proj3 < 2 and i <= #wildAllocs do
+          local wa = wildAllocs[i]
+          proj3 = proj3 + #wa.wilds + #wa.naturalCards
+          L(string.format("Wild alloc re-pruned after recompute (hand too small): %s", wa.rank))
+          table.remove(wildAllocs, i)
+        end
+      end
     end
   end
 
@@ -6653,20 +6738,40 @@ function executeTurnPlan(plan)
             end, dt)
             dt = dt + 0.15
           end
-          -- Rank-based scan after settle time: finds ALL cards in the meld column
-          -- (natural cards + wilds) regardless of how far spread4 has fanned them.
-          -- getCardsNearPos fails here because spread cards can be many units apart.
-          local capturedRank = capturedWa.rank
-          local capturedPos  = pos
+          -- Position-based sweep anchored near the wild meld deposit position.
+          -- getMeldColumnObjects(rank) would find wilds embedded in OTHER rank melds
+          -- (e.g. a Joker inside the 9s meld), making spread4 anchor at the wrong
+          -- meld and pull cards across the table.  getMeldColumnForSweep stops at
+          -- book boundaries and stays within the same column.
+          local capturedPos = pos
           Wait.time(function()
             pcall(function()
-              local allObjs = getMeldColumnObjects(sColor, capturedRank)
+              local nearby = getCardsNearPos(sColor, capturedPos, 1.5)
+              local anchor = nil
+              for _, obj in ipairs(nearby) do
+                local qty = 1
+                pcall(function() qty = obj.getQuantity() end)
+                if qty < 7 then anchor = obj; break end
+              end
               local safe = {}
-              for _, obj in ipairs(allObjs) do
-                if pcall(function() obj.getPosition() end) then table.insert(safe, obj) end
+              if anchor then
+                safe = getMeldColumnForSweep(sColor, anchor)
+              else
+                -- Fallback: rank scan but filter to cards near the deposit position.
+                local capturedRank = capturedWa.rank
+                local rankObjs = getMeldColumnObjects(sColor, capturedRank)
+                for _, obj in ipairs(rankObjs) do
+                  local ok_p2, opos = pcall(function() return obj.getPosition() end)
+                  if ok_p2 and opos then
+                    local dx = opos.x - capturedPos.x
+                    local dz = opos.z - capturedPos.z
+                    if (dx*dx + dz*dz) <= 9.0 then   -- within 3 units
+                      table.insert(safe, obj)
+                    end
+                  end
+                end
               end
               if #safe > 0 then
-                -- Use first found object's current position as spread anchor
                 local anchorPos
                 pcall(function() anchorPos = safe[1].getPosition() end)
                 spread4(sColor, anchorPos or capturedPos, safe)
@@ -7481,9 +7586,21 @@ function planLayoutRank(sColor, rank, planGoingOut)
 
   local rotY = getPlayerRotY(sColor)
 
-  -- Find target: any existing meld or book of this rank (books are valid extension targets).
+  -- Find target: prefer an open meld (non-book) of this rank; fall back to a completed
+  -- book only when no open meld exists.  Keeping the two pools separate prevents
+  -- planLayoutRank from targeting the completed book's position when both exist,
+  -- which would cause executeLayoutRank to sweep all same-rank cards into one pile.
   local allTableCards = getTableCardsOfRank(sColor, rank)
-  local existingCards = allTableCards
+  local openMeldCards = {}
+  for _, ec in ipairs(allTableCards) do
+    local qty = 0
+    pcall(function() qty = ec.getQuantity() end)
+    if qty < 7 then table.insert(openMeldCards, ec) end
+  end
+  -- targetIsBook: true when we are extending a completed book (no open meld exists).
+  -- Passed through the plan so executeLayoutRank can choose the right sweep strategy.
+  local targetIsBook  = (#openMeldCards == 0 and #allTableCards > 0)
+  local existingCards = (#openMeldCards > 0) and openMeldCards or allTableCards
 
   -- Require 3+ cards to start a new meld; any count is fine when extending an existing one.
   local minCards = (#existingCards > 0) and 1 or 3
@@ -7519,7 +7636,8 @@ function planLayoutRank(sColor, rank, planGoingOut)
   end
 
   return {ok=true, cards=rankCards, targetPos=targetPos,
-          colorZones=colorZones, rotY=rotY, rank=rank, sColor=sColor}
+          colorZones=colorZones, rotY=rotY, rank=rank, sColor=sColor,
+          targetIsBook=targetIsBook}
 end
 
 --==============================================================================
@@ -7546,22 +7664,50 @@ function executeLayoutRank(sColor, plan)
     t = t + 0.15
   end
 
-  local capturedRank = plan.rank
-  local capturedPos  = plan.targetPos
+  local capturedRank    = plan.rank
+  local capturedPos     = plan.targetPos
+  local capturedIsBook  = plan.targetIsBook
   Wait.time(function()
     if playerStuff[sColor] then playerStuff[sColor].bSpreading = false end
-    -- getMeldColumnObjects finds both natural rank cards AND wilds placed nearby,
-    -- so spread4 sees the full column including any wilds just laid from hand.
-    local freshScan = getMeldColumnObjects(sColor, capturedRank)
-    -- Do NOT filter out complete books (Deck qty>=7) here.
-    -- spread4 needs to see the full Deck so it can count 7+ cards,
-    -- apply the 90-degree rotation, and fire checkAndMoveBooks.
+
+    local freshScan
+    if capturedIsBook then
+      -- Extending a completed book: use rank-based scan so spread4 sees the full
+      -- Deck (qty≥7) and can apply the 90-degree rotation / checkAndMoveBooks.
+      freshScan = getMeldColumnObjects(sColor, capturedRank)
+    else
+      -- Extending an open meld (or creating a new one): use position-based walk
+      -- that stops at book boundaries (qty≥7).  This prevents getMeldColumnObjects
+      -- from sweeping a same-rank completed book that happens to share the column.
+      local nearby = getCardsNearPos(sColor, capturedPos, 1.5)
+      local anchor = nil
+      for _, obj in ipairs(nearby) do
+        local qty = 1
+        pcall(function() qty = obj.getQuantity() end)
+        if qty < 7 then anchor = obj; break end
+      end
+      if anchor then
+        freshScan = getMeldColumnForSweep(sColor, anchor)
+      else
+        -- Fallback: nothing found near the target position yet (all cards still
+        -- animating) — scan by rank but exclude completed books so we don't
+        -- accidentally grab them.
+        local rankScan = getMeldColumnObjects(sColor, capturedRank)
+        freshScan = {}
+        for _, obj in ipairs(rankScan) do
+          local qty = 1
+          pcall(function() qty = obj.getQuantity() end)
+          if qty < 7 then table.insert(freshScan, obj) end
+        end
+      end
+    end
+
     local safeCards = {}
     for _, obj in ipairs(freshScan) do
       local ok = pcall(function() obj.getPosition() end)
       if ok then table.insert(safeCards, obj) end
     end
-    dph("spread4 for rank=" .. capturedRank .. " safeCards=" .. #safeCards)
+    dph("spread4 for rank=" .. capturedRank .. " targetIsBook=" .. tostring(capturedIsBook) .. " safeCards=" .. #safeCards)
     if #safeCards > 0 then spread4(sColor, capturedPos, safeCards) end
     broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
   end, t + 0.5)
