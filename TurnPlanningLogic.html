@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Turn Planning Decision Flow</title>
+  <style>
+    body {
+      font-family: Segoe UI, Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      max-width: 860px;
+      margin: 40px auto;
+      padding: 0 24px 60px;
+      color: #1a1a1a;
+      background: #fff;
+    }
+    h1 {
+      font-size: 1.7em;
+      border-bottom: 3px solid #2a5a8a;
+      padding-bottom: 8px;
+      color: #2a5a8a;
+    }
+    h2 {
+      font-size: 1.15em;
+      margin-top: 2em;
+      margin-bottom: 0.3em;
+      background: #e8f0fa;
+      border-left: 5px solid #2a5a8a;
+      padding: 6px 10px;
+      color: #1a3a5a;
+    }
+    h3 {
+      font-size: 1em;
+      margin-top: 1.2em;
+      margin-bottom: 0.2em;
+      color: #2a5a8a;
+    }
+    p { margin: 0.4em 0 0.6em; }
+    ul, ol {
+      margin: 0.3em 0 0.6em 1.4em;
+      padding: 0;
+    }
+    li { margin-bottom: 0.25em; }
+
+    /* Priority labels */
+    .p1 { background:#c8e6c9; color:#1b5e20; }
+    .p2 { background:#ffe0b2; color:#7f3900; }
+    .p3 { background:#e3f2fd; color:#0d47a1; }
+    .p4 { background:#f3e5f5; color:#4a148c; }
+    .p5 { background:#fff3e0; color:#e65100; }
+    .phase-badge {
+      display: inline-block;
+      font-weight: bold;
+      font-size: 0.8em;
+      border-radius: 3px;
+      padding: 1px 6px;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    /* Suppression / allow callouts */
+    .suppress {
+      background: #fff8e1;
+      border-left: 4px solid #f9a825;
+      padding: 5px 10px;
+      margin: 0.4em 0 0.6em;
+      border-radius: 0 4px 4px 0;
+    }
+    .allow {
+      background: #f1f8e9;
+      border-left: 4px solid #558b2f;
+      padding: 5px 10px;
+      margin: 0.4em 0 0.6em;
+      border-radius: 0 4px 4px 0;
+    }
+    .bug-note {
+      background: #fce4ec;
+      border-left: 4px solid #c62828;
+      padding: 5px 10px;
+      margin: 0.4em 0 0.6em;
+      border-radius: 0 4px 4px 0;
+    }
+    .note {
+      background: #f5f5f5;
+      border-left: 4px solid #9e9e9e;
+      padding: 5px 10px;
+      margin: 0.4em 0 0.6em;
+      border-radius: 0 4px 4px 0;
+      font-style: italic;
+    }
+
+    /* Overview box */
+    .overview {
+      background: #f0f4fa;
+      border: 1px solid #b0c4de;
+      border-radius: 6px;
+      padding: 12px 16px;
+      margin-bottom: 1.5em;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 0.6em 0;
+      font-size: 0.93em;
+    }
+    th {
+      background: #2a5a8a;
+      color: #fff;
+      padding: 6px 10px;
+      text-align: left;
+    }
+    td {
+      border: 1px solid #ccd;
+      padding: 5px 10px;
+      vertical-align: top;
+    }
+    tr:nth-child(even) td { background: #f7f9fc; }
+
+    code {
+      background: #eef;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 0.92em;
+    }
+    hr { border: none; border-top: 1px solid #dde; margin: 2em 0; }
+  </style>
+</head>
+<body>
+
+<h1>Turn Planning — Decision Flow</h1>
+
+<div class="overview">
+  <strong>Key principle:</strong> The planner runs once at plan time and produces a fixed list of plays.
+  Execution fires those plays as timed animations — it <em>never</em> re-evaluates mid-execution.
+  The plan is built from a frozen snapshot of TTS state taken at the moment planning starts.
+</div>
+
+<!-- ─── PHASE 1 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 1 — Snapshot</h2>
+<p>
+  A live read of TTS state: hand cards, all melds and books on the table, foot pile status,
+  and current book counts. Everything downstream works from this frozen snapshot.
+</p>
+
+<!-- ─── PHASE 2 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 2 — Natural Card Plays <code>(evalMeldsToPlay)</code></h2>
+
+<p>
+  For every eligible rank in hand where <strong>count ≥ 3</strong> OR
+  <strong>an existing meld/book of that rank exists on the table</strong>:
+</p>
+
+<h3><span class="phase-badge p1">P1</span> Complete a red book (all naturals, no wilds)</h3>
+<p>Condition: existing meld + hand cards ≥ 7, and the meld currently has 0 wilds.</p>
+<div class="suppress">
+  <strong>Suppressed when:</strong> post-foot AND already have 2+ red books AND still need black books —
+  <em>unless</em> this meld is at exactly 6 cards and enough other near-book (6-card) melds still
+  exist to satisfy the remaining black-book requirement.
+</div>
+
+<h3><span class="phase-badge p2">P2</span> Complete a black book (naturals + wilds)</h3>
+<p>Condition: existing meld + hand cards + available wilds ≥ 7. Only assigned once ≥ 2 red books
+are on the table.</p>
+
+<h3><span class="phase-badge p3">P3</span> Extend an existing open meld (won't book this turn)</h3>
+<p>Always generated; never skipped.</p>
+
+<h3><span class="phase-badge p4">P4</span> Start a new meld (3+ naturals, no existing meld)</h3>
+<p>Always generated.</p>
+
+<h3><span class="phase-badge p5">P5</span> Extend a completed book (add cards to a 7+ book)</h3>
+<div class="suppress">
+  <strong>Suppressed by default.</strong>
+</div>
+<div class="allow">
+  <strong>Allowed only when any of:</strong>
+  <ul>
+    <li>Foot pile is still on the table (may need to empty hand for foot pickup)</li>
+    <li>Already have 2 red + 2 black books (<code>canGoOut = true</code>)</li>
+    <li>An opponent has 3 of the 4 required books (1 book from going out)</li>
+  </ul>
+</div>
+<div class="note">
+  P5 plays suppressed here can still be injected later by the Go-Out Extension Pass (Phase 6).
+</div>
+
+<p>
+  <strong>Sort order:</strong> plays are sorted P1 → P2 → P3 → P4 → P5.
+  Within the same priority, more cards first.
+</p>
+
+<!-- ─── PHASE 3 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 3 — Project Red Book Count</h2>
+<p>
+  <code>projRed = existing red books + count of P1 plays in the plan</code><br>
+  This number is passed into wild allocation to gate what wilds are allowed to do.
+</p>
+
+<!-- ─── PHASE 4 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 4 — Wild Card Plays <code>(evalWildAllocations)</code></h2>
+
+<div class="suppress">
+  <strong>Early exit — hold ALL wilds if:</strong>
+  <ul>
+    <li><code>projRed &lt; 2</code> AND no hand-emptying scenario AND no wild book completion possible</li>
+    <li>Foot still on table AND no hand-emptying scenario AND no wild book completion possible</li>
+  </ul>
+</div>
+
+<h3>Wild Phase 1 — Create a new meld from a hand pair (2 naturals + 1 wild = 3-card meld)</h3>
+<div class="suppress">
+  <strong>Suppressed when:</strong> <code>needBlackBook = true</code> (have fewer than 2 black books)
+  AND none of the hand-emptying flags are set.
+</div>
+<div class="allow">
+  <strong>Retry after Wild Phase 2:</strong> if Phase 2 completes the 2nd black book this turn,
+  Phase 1 runs again for any pairs that were previously blocked.
+</div>
+
+<h3>Wild Phase 2 — Add wilds to an existing open meld to complete a black book</h3>
+<ul>
+  <li>Meld must reach 7 cards total with the added wilds</li>
+  <li>Meld must have both red-suit and black-suit natural cards</li>
+  <li>Requires ≥ 2 red books already <em>on the table</em> (projected reds don't count yet)</li>
+  <li>Stops once 2 black books are projected for this turn</li>
+  <li><em>Also handles melds already at 7+ natural cards: one wild converts a red book to a black book</em></li>
+</ul>
+
+<h3>Wild Phase 3 — Add a wild to a meld that already has 1 wild (push toward book)</h3>
+<p>Extends a partially-black meld one step closer to the 7-card black book.</p>
+
+<h3>Wild Phase 4 — Start a new wild meld (3+ wilds, no existing wild meld pile)</h3>
+<div class="suppress">
+  <strong>Blocked when:</strong> foot still on table AND opponent has 3+ melds (pressure),
+  OR a hand-emptying-via-wild-extend scenario is active.
+</div>
+
+<h3>Wild Phase 5 — Place remaining wilds on any eligible meld</h3>
+<p>Post-foot wilds only land here if the meld would reach book level, or going-out conditions
+are met, or near-book urgency exists with opponent pressure.</p>
+
+<!-- ─── PHASE 5 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 5 — Go-Out Check (First Pass)</h2>
+
+<p>
+  <code>projHandCount = hand size − (natural cards consumed + wild cards consumed)</code>
+</p>
+
+<table>
+  <tr>
+    <th>Condition</th>
+    <th>Result</th>
+  </tr>
+  <tr>
+    <td><code>projHandCount ≤ 1</code> AND <code>projRed ≥ 2</code> AND <code>projBlack ≥ 2</code> AND foot picked up</td>
+    <td>✅ <strong>Go-out = YES</strong></td>
+  </tr>
+  <tr>
+    <td><code>projHandCount &gt; 1</code> AND books are met</td>
+    <td>⚠️ "Projected go-out: N cards remain" — extension pass will attempt to fix</td>
+  </tr>
+  <tr>
+    <td>Books not met or foot still on table</td>
+    <td>❌ Not going out this turn</td>
+  </tr>
+</table>
+
+<!-- ─── PHASE 6 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 6 — Go-Out Extension Pass</h2>
+<p>
+  <strong>Runs when:</strong> post-foot, books met this turn (<code>projRed ≥ 2</code>,
+  <code>projBlack ≥ 2</code>), but <code>projHandCount &gt; 1</code>.
+</p>
+<p>
+  Scans every remaining unconsumed hand card. For each card whose rank has
+  <strong>any destination</strong> (an existing book or an open meld of that rank),
+  a P5 play is injected directly — bypassing <code>evalMeldsToPlay</code> suppression rules.
+  After injecting, <code>projHandCount</code> is recomputed. If now ≤ 1, the go-out check
+  fires again and sets go-out = YES.
+</p>
+<div class="note">
+  Cards with no destination (no book, no open meld for their rank) cannot be placed and will
+  prevent going out even if all other cards are consumed. This is working as intended — there
+  is nowhere legal to put them.
+</div>
+
+<!-- ─── PHASE 7 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 7 — Keep-2-Cards Pruning</h2>
+<div class="allow">
+  <strong>Skipped entirely when going out.</strong>
+</div>
+<p>
+  Otherwise: if <code>projHandCount &lt; 2</code> (plays would leave fewer than 2 cards in hand
+  without going out), prune in order:
+</p>
+<ol>
+  <li>Wild allocs — highest priority number (least important) first</li>
+  <li>P3/P4 natural melds — fewest cards first, then higher priority number first</li>
+</ol>
+<p>Goal: guarantee at least 1 card to keep + 1 card to discard after all plays.</p>
+
+<!-- ─── PHASE 8 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 8 — Discard Selection <code>(evalDiscard)</code></h2>
+<p>From remaining unconsumed hand cards, pick the best discard using these buckets in order:</p>
+<ol>
+  <li><strong>Unprotected</strong> — rank has no meld on the table, not held for a black book</li>
+  <li><strong>Surplus held</strong> — rank is held (needs a wild to become black book) but hand has 2+ copies; discard one, keep one</li>
+  <li><strong>Protected</strong> — rank has a meld on table, not held for black book</li>
+  <li><strong>Held (last copy)</strong> — last card of a rank whose open meld needs a wild to become a black book</li>
+  <li><strong>Wild fallback</strong> — 2s before Jokers</li>
+</ol>
+<p>
+  Within each bucket: <strong>fewest copies first</strong> (singletons before pairs),
+  then <strong>lowest rank value</strong> (4s before Aces) as tiebreaker.
+</p>
+
+<!-- ─── PHASE 9 ─────────────────────────────────────────────────────────── -->
+<h2>Phase 9 — Wild-Discard Prevention</h2>
+<p>
+  If the chosen discard is a wild card AND we are <strong>not</strong> going out:
+  prune P2+ natural melds one at a time (least important first) until a non-wild
+  discard becomes available.
+</p>
+<p>
+  If after all pruning the only remaining card is still a wild (and we're not going out):
+  <strong>scrap all plays</strong> and re-evaluate the discard from a full hand.
+</p>
+
+<hr>
+
+<!-- ─── BUGS ─────────────────────────────────────────────────────────────── -->
+<h2>Common Bug Patterns</h2>
+
+<div class="bug-note">
+  <strong>"Played all my cards but didn't go out"</strong><br>
+  Phase 7 (Keep-2-Cards Pruning) only fires when <code>goOut = false</code>. If go-out was
+  incorrectly <em>not</em> detected, pruning strips plays to keep 2 in hand — making it look
+  like the bot over-played.
+  <br><br>
+  Check the log for: <em>"Melds pruned (cannot go out, hand too small)"</em> or
+  <em>"Wild alloc pruned (hand too small)"</em>. If those appear, go-out detection failed.
+  Look at <code>projRed</code> / <code>projBlack</code> values and whether the book-completing
+  wild alloc had <code>completesBook = false</code> (usually a color-balance issue on the meld).
+</div>
+
+<div class="bug-note">
+  <strong>"Didn't play cards it should have onto books"</strong><br>
+  P5 plays (extending completed books) are suppressed in Phase 2 unless
+  <code>canGoOut = true</code>. If books are only completed <em>this turn</em> via wilds,
+  <code>canGoOut</code> was false at snapshot time. Those cards can only be added by the
+  Phase 6 extension pass — which only runs if wild plays also achieve <code>projBlack ≥ 2</code>
+  this same turn.
+</div>
+
+<div class="bug-note">
+  <strong>"Held wilds when it should have played them"</strong><br>
+  The Phase 4 early exits are the most likely cause. Most common: <code>needBlackBook = true</code>
+  and no <code>canEmpty*</code> flag is set, causing all wilds to be held.
+  <br>
+  Check: <em>"Wild plays: held pre-foot"</em> or the <em>"[p1-skip] pairs suppressed"</em> message.
+</div>
+
+<div class="bug-note">
+  <strong>"Projected go-out but didn't go"</strong><br>
+  <code>projHandCount &gt; 1</code> after Phase 6 means the extension pass ran out of
+  destinations. The remaining cards have no book and no open meld for their rank,
+  so there is nowhere legal to place them. The bot holds them and discards one instead.
+</div>
+
+</body>
+</html>

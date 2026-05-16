@@ -48,6 +48,7 @@ function classifyBook(deckObj)
   end
 
   if mixed then return nil end           -- inconsistent ranks
+  if rankFound == "3" then return nil end  -- 3s are never a valid book
   if wildCount == qty then return "wild" end
   -- Color-balance rule: rank books require ≥1 red-suit and ≥1 black-suit natural card.
   if not (hasRed and hasBlack) then return nil end
@@ -1312,6 +1313,123 @@ function buildTurnPlan(sColor)
     cardsConsumed = cardsConsumed + #wa.wilds + #wa.naturalCards
   end
   local projHandCount = state.handCount - cardsConsumed
+
+  -- Go-out via additional melds: books met but projHandCount > 1.
+  -- Covers: (A) wild meld when only wilds + 0-1 naturals remain,
+  --         (B) new rank melds from pairs of same-rank naturals filled with wilds,
+  --         leaving exactly 1 natural to discard and 0 wilds unused (or ≥3 for wild meld).
+  if not state.hasFoot and projRed >= 2 and projBlack >= 2 and projHandCount > 1 then
+    local usedByRank = {}
+    local wildConsumed = 0
+    for _, m  in ipairs(melds)      do usedByRank[m.rank] = (usedByRank[m.rank] or 0) + m.count end
+    for _, wa in ipairs(wildAllocs) do
+      wildConsumed = wildConsumed + #wa.wilds
+      if wa.rank and wa.rank ~= "__wild__" then
+        usedByRank[wa.rank] = (usedByRank[wa.rank] or 0) + #wa.naturalCards
+      end
+    end
+    local wildRem = state.wildCount - wildConsumed
+
+    local remByRank = {}
+    local totalNat = 0
+    for rank, total in pairs(state.handByRank) do
+      local r = total - (usedByRank[rank] or 0)
+      if r > 0 then remByRank[rank] = r; totalNat = totalNat + r end
+    end
+
+    local cand = nil
+    if not cand and totalNat == 0 and wildRem >= 3 then
+      cand = {discardRank=nil, rankMelds={}, wildMeld=true, extraWilds=wildRem}
+    end
+    if not cand and totalNat == 1 and wildRem >= 3 then
+      cand = {discardRank=next(remByRank), rankMelds={}, wildMeld=true, extraWilds=wildRem}
+    end
+    if not cand then
+      for discardRank in pairs(remByRank) do
+        local rankMelds = {}
+        local wildsNeeded = 0
+        local ok = true
+        for rank, cnt in pairs(remByRank) do
+          local c = cnt - (rank == discardRank and 1 or 0)
+          if   c == 1 then ok = false; break
+          elseif c >= 2 then
+            rankMelds[rank] = c
+            wildsNeeded = wildsNeeded + math.max(0, 3 - c)
+          end
+        end
+        if ok and wildsNeeded <= wildRem then
+          local extra = wildRem - wildsNeeded
+          local absorbCap = 0
+          for _, cnt in pairs(rankMelds) do absorbCap = absorbCap + (2 - math.max(0, 3 - cnt)) end
+          if extra == 0 or extra >= 3 or extra <= absorbCap then
+            cand = {discardRank=discardRank, rankMelds=rankMelds,
+                    wildMeld=(extra >= 3), wildsNeeded=wildsNeeded, extraWilds=extra}
+            break
+          end
+        end
+      end
+    end
+
+    if cand then
+      local usedWildGuids = {}
+      for _, wa in ipairs(wildAllocs) do
+        for _, wc in ipairs(wa.wilds) do
+          pcall(function() usedWildGuids[wc.obj.getGUID()] = true end)
+        end
+      end
+      local avWilds = {}
+      for _, card in ipairs(state.hand) do
+        if card.color == "Wild" then
+          local guid; local ok = pcall(function() guid = card.obj.getGUID() end)
+          if ok and guid and not usedWildGuids[guid] then table.insert(avWilds, card) end
+        end
+      end
+
+      local wi = 1
+      local assignedRank = {}
+      for rank, cnt in pairs(cand.rankMelds) do
+        local baseW = math.max(0, 3 - cnt)
+        local extra = math.min(2 - baseW, cand.extraWilds or 0)
+        cand.extraWilds = (cand.extraWilds or 0) - extra
+        local meldWilds = {}
+        for i = 1, baseW + extra do
+          if wi <= #avWilds then table.insert(meldWilds, avWilds[wi]); wi = wi + 1 end
+        end
+        local natCards = {}
+        for _, card in ipairs(state.hand) do
+          if card.rank == rank and card.color ~= "Wild" then
+            local planUsed = (usedByRank[rank] or 0) + (assignedRank[rank] or 0)
+            if planUsed < (state.handByRank[rank] or 0) then
+              table.insert(natCards, card)
+              assignedRank[rank] = (assignedRank[rank] or 0) + 1
+              if #natCards == cnt then break end
+            end
+          end
+        end
+        table.insert(wildAllocs, {
+          rank=rank, wilds=meldWilds, naturalCards=natCards,
+          meldObj=nil, isNew=true, isWildMeld=false,
+          completesBook=false, naturalsAlreadyPlaced=false,
+        })
+        cardsConsumed = cardsConsumed + #natCards + #meldWilds
+      end
+      if cand.wildMeld then
+        local wmCards = {}
+        for i = wi, #avWilds do table.insert(wmCards, avWilds[i]) end
+        if #wmCards >= 3 then
+          table.insert(wildAllocs, {
+            rank="__wild__", wilds=wmCards, naturalCards={},
+            meldObj=nil, isNew=true, isWildMeld=true,
+            completesBook=false, naturalsAlreadyPlaced=false,
+          })
+          cardsConsumed = cardsConsumed + #wmCards
+        end
+      end
+      projHandCount = state.handCount - cardsConsumed
+      L(string.format("  [go-out ext] discard=%s → new melds, projHand=%d",
+        tostring(cand.discardRank), projHandCount))
+    end
+  end
 
   -- evalGoOut may have returned should=true purely on books/foot state, without
   -- knowing what plays are possible this turn.  Override to false if the planned
