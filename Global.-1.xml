@@ -220,7 +220,7 @@
        width="420" height="30"
        rectAlignment="MiddleCenter"
        returnToOriginalPositionWhenReleased="false" allowDragging="true"
-       color="#bbbbbb00"
+       color="#bbbbbb"
        visibility="White">
     <Row id="PlanResultMenuBar" class="MenuBar" width="420">
         <Text id="PlanResultTitle" text="Turn Plan" class="UIText"
