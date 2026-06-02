@@ -800,6 +800,7 @@ function evalWildAllocations(state, meldPlan, logFn, projRed)
           if hc.color == "Black" then mc.hasBlack = true end
         end
         melds[m.rank].total = melds[m.rank].total + m.count
+        if m.priority == 1 then melds[m.rank].completingRedBook = true end
       else
         -- New meld: compute colors from the hand cards being played.
         local mc = {hasRed=false, hasBlack=false}
@@ -1428,6 +1429,143 @@ function buildTurnPlan(sColor)
       projHandCount = state.handCount - cardsConsumed
       L(string.format("  [go-out ext] discard=%s → new melds, projHand=%d",
         tostring(cand.discardRank), projHandCount))
+    end
+  end
+
+  -- Case A3: books met but projHandCount > 1 due to 1-2 unallocated wilds + 1 natural.
+  -- Place the remaining wilds on existing open rank melds so the natural becomes the discard.
+  if not state.hasFoot and projRed >= 2 and projBlack >= 2 and projHandCount > 1 then
+    local wca3 = 0
+    for _, wa in ipairs(wildAllocs) do wca3 = wca3 + #wa.wilds end
+    local wr3  = state.wildCount - wca3
+    local nr3  = projHandCount - wr3
+    if nr3 == 1 and wr3 >= 1 and wr3 < 3 then
+      local allocedGuids = {}
+      for _, wa in ipairs(wildAllocs) do
+        for _, wc in ipairs(wa.wilds) do
+          pcall(function() allocedGuids[wc.obj.getGUID()] = true end)
+        end
+      end
+      local wildsToPlace = {}
+      for _, card in ipairs(state.hand) do
+        if card.color == "Wild" then
+          local guid; local ok = pcall(function() guid = card.obj.getGUID() end)
+          if ok and guid and not allocedGuids[guid] then table.insert(wildsToPlace, card) end
+        end
+      end
+      if #wildsToPlace >= wr3 then
+        local openMelds = {}
+        for rank, meldInfo in pairs(state.meldsByRank) do
+          local isBook = false
+          for _, btype in ipairs({"red", "black"}) do
+            for _, b in ipairs(state.books[btype]) do
+              if b.rank == rank then isBook = true; break end
+            end
+            if isBook then break end
+          end
+          if not isBook and meldInfo.count < 7 then
+            local wildCt = 0
+            pcall(function() wildCt = countMeldWilds(meldInfo.obj) end)
+            wildCt = wildCt + (meldInfo.embeddedWilds or 0)
+            local allocWilds = 0
+            for _, wa in ipairs(wildAllocs) do
+              if wa.rank == rank then allocWilds = allocWilds + #wa.wilds end
+            end
+            if wildCt + allocWilds < 2 then
+              table.insert(openMelds, {rank=rank, meldInfo=meldInfo,
+                wilds=wildCt+allocWilds, total=meldInfo.count})
+            end
+          end
+        end
+        table.sort(openMelds, function(a, b)
+          if a.total ~= b.total then return a.total > b.total end
+          return a.wilds < b.wilds
+        end)
+        local placed = 0
+        for _, dest in ipairs(openMelds) do
+          if placed >= wr3 then break end
+          local canAbsorb = math.min(2 - dest.wilds, wr3 - placed)
+          for i = 1, canAbsorb do
+            local wc = wildsToPlace[placed + 1]
+            if not wc then break end
+            local existingAlloc = nil
+            for _, wa in ipairs(wildAllocs) do
+              if wa.rank == dest.rank then existingAlloc = wa; break end
+            end
+            if existingAlloc then
+              table.insert(existingAlloc.wilds, wc)
+            else
+              table.insert(wildAllocs, {
+                rank=dest.rank, wilds={wc}, naturalCards={},
+                meldObj=dest.meldInfo.obj, isNew=false, isWildMeld=false,
+                completesBook=false, naturalsAlreadyPlaced=false,
+              })
+            end
+            placed = placed + 1
+            dest.wilds = dest.wilds + 1
+          end
+        end
+        if placed >= wr3 then
+          cardsConsumed = cardsConsumed + placed
+          projHandCount = state.handCount - cardsConsumed
+          L(string.format("  [go-out A3] placed %d wild(s) on existing meld(s), 1 natural left to discard",
+            placed))
+        end
+      end
+    end
+  end
+
+  -- Optimization: projHandCount==1, books met, remaining card is a wild.
+  -- Rather than discarding the wild (wasting its points), place it on a meld that
+  -- can still accept one wild.  Prefer melds where this completes a book.
+  if not state.hasFoot and projRed >= 2 and projBlack >= 2 and projHandCount == 1 then
+    local wildConsumed = 0
+    for _, wa in ipairs(wildAllocs) do wildConsumed = wildConsumed + #wa.wilds end
+    if state.wildCount - wildConsumed == 1 then
+      local planWilds = {}
+      for _, wa in ipairs(wildAllocs) do
+        if wa.rank and wa.rank ~= "__wild__" and not wa.isWildMeld then
+          planWilds[wa.rank] = (planWilds[wa.rank] or 0) + #wa.wilds
+        end
+      end
+      local bestRank, bestMeld, bestCompletes = nil, nil, false
+      for rank, m in pairs(state.meldsByRank) do
+        local mw = (m.embeddedWilds or 0)
+        pcall(function() mw = mw + countMeldWilds(m.obj) end)
+        local totalWilds = mw + (planWilds[rank] or 0)
+        local projTotal  = m.count + totalWilds
+        if totalWilds < 2 and projTotal < 7 then
+          local completes = (projTotal + 1 >= 7)
+          if not bestRank or (completes and not bestCompletes) then
+            bestRank, bestMeld, bestCompletes = rank, m, completes
+          end
+        end
+      end
+      if bestRank then
+        local usedGuids = {}
+        for _, wa in ipairs(wildAllocs) do
+          for _, wc in ipairs(wa.wilds) do
+            pcall(function() usedGuids[wc.obj.getGUID()] = true end)
+          end
+        end
+        for _, card in ipairs(state.hand) do
+          if card.color == "Wild" then
+            local guid; local ok = pcall(function() guid = card.obj.getGUID() end)
+            if ok and guid and not usedGuids[guid] then
+              table.insert(wildAllocs, {
+                rank=bestRank, wilds={card}, naturalCards={},
+                meldObj=bestMeld.obj, isNew=false, isWildMeld=false,
+                completesBook=bestCompletes, naturalsAlreadyPlaced=false,
+              })
+              cardsConsumed = cardsConsumed + 1
+              projHandCount = state.handCount - cardsConsumed
+              L(string.format("  [last wild on %s] projHand→%d (play wild rather than discard)",
+                bestRank, projHandCount))
+              break
+            end
+          end
+        end
+      end
     end
   end
 

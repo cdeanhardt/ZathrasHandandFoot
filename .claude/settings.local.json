@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Copy-Item \"v:\\\\Projects\\\\ZathrasHandandFoot\\\\Global.-1.lua\" \"c:\\\\Users\\\\clif\\\\AppData\\\\Local\\\\Temp\\\\TabletopSimulator\\\\Tabletop Simulator Lua\\\\Global.-1.lua\" -Force)",
+      "Bash(Copy-Item \"v:\\\\Projects\\\\ZathrasHandandFoot\\\\ZHF_Advisor.lua\" \"c:\\\\Users\\\\clif\\\\AppData\\\\Local\\\\Temp\\\\TabletopSimulator\\\\Tabletop Simulator Lua\\\\ZHF_Advisor.lua\" -Force)",
+      "Bash(Write-Host \"Synced.\")",
+      "PowerShell(Copy-Item \"v:\\\\Projects\\\\ZathrasHandandFoot\\\\Global.-1.lua\" \"c:\\\\Users\\\\clif\\\\AppData\\\\Local\\\\Temp\\\\TabletopSimulator\\\\Tabletop Simulator Lua\\\\Global.-1.lua\" -Force)",
+      "PowerShell(Copy-Item \"v:\\\\Projects\\\\ZathrasHandandFoot\\\\ZHF_Advisor.lua\" \"c:\\\\Users\\\\clif\\\\AppData\\\\Local\\\\Temp\\\\TabletopSimulator\\\\Tabletop Simulator Lua\\\\ZHF_Advisor.lua\" -Force)",
+      "PowerShell(Copy-Item \"v:\\\\Projects\\\\ZathrasHandandFoot\\\\Global.-1.xml\" \"c:\\\\Users\\\\clif\\\\AppData\\\\Local\\\\Temp\\\\TabletopSimulator\\\\Tabletop Simulator Lua\\\\Global.-1.xml\" -Force)",
+      "Bash(grep -rn \"onObjectNumberTyped\\\\|numberTyped\\\\|number_typed\" \"c:\\\\Users\\\\clif\\\\AppData\\\\Local\\\\Temp\\\\TabletopSimulator\\\\Tabletop Simulator Lua\\\\\" 2>/dev/null | head -20)",
+      "Read(//c/Users/clif/AppData/Local/Temp/TabletopSimulator/Tabletop Simulator Lua\" 2>/dev/**)",
+      "PowerShell(if \\($?\\) { \"Synced OK\" } else { \"SYNC FAILED\" })"
+    ]
+  }
+}

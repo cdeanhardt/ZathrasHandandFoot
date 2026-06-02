@@ -146,43 +146,25 @@
                 textColor="#FFFFFF" text="^"
                 onClick="click_ToggleActionPanel" />
     </Row>
+    <!-- Collapsed height=230; expanded height=415 (set dynamically by click_ToggleActionExpanded) -->
     <Panel id="ActionSubPanel" class="SubPanel"
-           width="190" height="360"
+           width="190" height="230"
            rectAlignment="UpperLeft" offsetXY="0 -30"
            color="#bbbbbb">
-        <Button id="btnPlayHand"
-                text="Play Hand" width="174" height="30"
-                rectAlignment="UpperCenter" offsetXY="0 -8"
-                color="#2255aa" textColor="#FFFFFF" fontSize="14"
-                onClick="click_ActionPlayHand" />
-        <Button id="btnLayoutAllHand"
-                text="Layout All Hand" width="174" height="30"
-                rectAlignment="UpperCenter" offsetXY="0 -43"
-                color="#2255aa" textColor="#FFFFFF" fontSize="14"
-                onClick="click_ActionLayoutAllHand" />
-        <Button id="btnPlayAndLay"
-                text="Play and Lay" width="174" height="30"
-                rectAlignment="UpperCenter" offsetXY="0 -78"
-                color="#226622" textColor="#FFFFFF" fontSize="14"
-                onClick="click_ActionPlayAndLay" />
-        <Button id="btnDrawSortPlayLay"
-                text="Draw, Sort, Play Lay" width="174" height="30"
-                rectAlignment="UpperCenter" offsetXY="0 -113"
-                color="#664422" textColor="#FFFFFF" fontSize="14"
-                onClick="click_ActionDrawSortPlayLay" />
-        <Button id="btnDiscard"
-                text="Discard" width="174" height="30"
-                rectAlignment="UpperCenter" offsetXY="0 -148"
-                color="#882222" textColor="#FFFFFF" fontSize="14"
-                onClick="click_ActionDiscard" />
+        <!-- ── Always-visible buttons ── -->
+        <Button id="btnToggleActionExpanded"
+                text="▼ More" width="174" height="20"
+                rectAlignment="UpperCenter" offsetXY="0 -5"
+                color="#444444" textColor="#FFFFFF" fontSize="11"
+                onClick="click_ToggleActionExpanded" />
         <Button id="btnDraw"
                 text="Draw" width="174" height="30"
-                rectAlignment="UpperCenter" offsetXY="0 -183"
+                rectAlignment="UpperCenter" offsetXY="0 -30"
                 color="#556644" textColor="#FFFFFF" fontSize="14"
                 onClick="click_ActionDraw" />
         <Button id="btnPlan"
                 text="Plan" width="174" height="30"
-                rectAlignment="UpperCenter" offsetXY="0 -218"
+                rectAlignment="UpperCenter" offsetXY="0 -65"
                 color="#445566" textColor="#FFFFFF" fontSize="14"
                 onClick="click_ActionPlan" />
         <Toggle id="toggleAutodraw"
@@ -190,25 +172,61 @@
                 isOn="false"
                 onValueChanged="click_ToggleAutodraw"
                 width="174" height="25"
-                rectAlignment="UpperCenter" offsetXY="0 -258"
-                fontSize="12" textColor="#FFFFFF"
+                rectAlignment="UpperCenter" offsetXY="0 -100"
+                fontSize="12" textColor="#000000"
                 toggleWidth="18" toggleHeight="18" />
         <Toggle id="toggleAutoExec"
                 text=" Auto Exec"
                 isOn="false"
                 onValueChanged="click_ToggleAutoExec"
                 width="174" height="25"
-                rectAlignment="UpperCenter" offsetXY="0 -293"
-                fontSize="12" textColor="#FFFFFF"
+                rectAlignment="UpperCenter" offsetXY="0 -130"
+                fontSize="12" textColor="#000000"
                 toggleWidth="18" toggleHeight="18" />
         <Toggle id="toggleEnhance"
                 text=" Enhance"
                 isOn="true"
                 onValueChanged="click_ToggleEnhance"
                 width="174" height="25"
-                rectAlignment="UpperCenter" offsetXY="0 -328"
-                fontSize="12" textColor="#FFFFFF"
+                rectAlignment="UpperCenter" offsetXY="0 -160"
+                fontSize="12" textColor="#000000"
                 toggleWidth="18" toggleHeight="18" />
+        <Button id="btnFixPlanPanel"
+                text="Fix Plan Panel" width="174" height="25"
+                rectAlignment="UpperCenter" offsetXY="0 -190"
+                color="#554444" textColor="#FFFFFF" fontSize="11"
+                onClick="click_FixPlanPanel" />
+        <!-- ── Expandable buttons (hidden by default) ── -->
+        <Button id="btnPlayHand"
+                text="Play Hand" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -230"
+                color="#2255aa" textColor="#FFFFFF" fontSize="14"
+                active="false"
+                onClick="click_ActionPlayHand" />
+        <Button id="btnLayoutAllHand"
+                text="Layout All Hand" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -265"
+                color="#2255aa" textColor="#FFFFFF" fontSize="14"
+                active="false"
+                onClick="click_ActionLayoutAllHand" />
+        <Button id="btnPlayAndLay"
+                text="Play and Lay" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -300"
+                color="#226622" textColor="#FFFFFF" fontSize="14"
+                active="false"
+                onClick="click_ActionPlayAndLay" />
+        <Button id="btnDrawSortPlayLay"
+                text="Draw, Sort, Play Lay" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -335"
+                color="#664422" textColor="#FFFFFF" fontSize="14"
+                active="false"
+                onClick="click_ActionDrawSortPlayLay" />
+        <Button id="btnDiscard"
+                text="Discard" width="174" height="30"
+                rectAlignment="UpperCenter" offsetXY="0 -370"
+                color="#882222" textColor="#FFFFFF" fontSize="14"
+                active="false"
+                onClick="click_ActionDiscard" />
     </Panel>
 </Panel>
 
@@ -218,9 +236,9 @@
 <!-- ============================================================ -->
 <Panel id="PlanResultPanel" active="false"
        width="420" height="30"
-       rectAlignment="MiddleCenter"
+       rectAlignment="MiddleCenter" offsetXY="280 -160"
        returnToOriginalPositionWhenReleased="false" allowDragging="true"
-       color="#bbbbbb"
+       color="#bbbbbb00"
        visibility="White">
     <Row id="PlanResultMenuBar" class="MenuBar" width="420">
         <Text id="PlanResultTitle" text="Turn Plan" class="UIText"

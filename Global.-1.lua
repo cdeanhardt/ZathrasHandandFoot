@@ -408,14 +408,21 @@ function setActionPanelVisibility()
   -- re-evaluate visibility= when a player changes seats.
   -- Use Player["White"].seated (canonical TTS property) rather than iterating
   -- Player.getPlayers(), which can lag behind the actual seat state.
+  --
+  -- IMPORTANT: Suppress toggle callbacks while changing active state.
+  -- TTS fires onValueChanged on child Toggles when a panel is activated or
+  -- deactivated. In hotseat mode the current seated player at that moment is
+  -- whoever just swapped in, which was silently setting their bAutodraw = true.
   Wait.time(function()
     local ok, whiteSeated = pcall(function() return Player["White"].seated end)
+    gSuppressToggleCallbacks = true
     if ok and whiteSeated then
       UI.setAttribute("ActionPanel", "visibility", "White")
       UI.setAttribute("ActionPanel", "active", "true")
     else
       UI.setAttribute("ActionPanel", "active", "false")
     end
+    Wait.time(function() gSuppressToggleCallbacks = false end, 0.5)
   end, 0.3)
 end
 
@@ -425,9 +432,22 @@ end
 -- if onPlayerChangeColor fires in an unexpected order in hotswap mode.
 function onPlayerTurnStart(player_color, prev_player_color)
   setActionPanelVisibility()
-  -- Autodraw: if the player has the checkbox on and the hand is still active,
-  -- automatically draw two cards, handle red 3s, sort, then show a plan.
+  -- Reset every player's draw counts at the start of each turn.
+  -- In hotswap mode the physical White player handles all draws; their drawcount
+  -- from the previous turn would otherwise block draws on the next player's turn.
+  for _, color in ipairs({"White", "Green", "Blue", "Red"}) do
+    if playerStuff[color] then
+      playerStuff[color].drawcount = 0
+      playerStuff[color].drawcountdisc = 0
+    end
+  end
+  -- Autodraw is only available for White (the human player's seat).
+  -- Clear it on non-White turns in case a save or a panel-activation callback
+  -- ever leaked a true value into another player's slot.
   local ps = playerStuff[player_color]
+  if ps and player_color ~= "White" then
+    ps.bAutodraw = false
+  end
   if ps and ps.bAutodraw and not gbHandWonPause and not gbFinishFlag and not gbHandOver then
     triggerAutodraw(player_color)
   end
@@ -454,7 +474,9 @@ end
 
 -- Draw 2 cards, handle red 3s, sort the hand, then build and display a plan.
 -- Called automatically by onPlayerTurnStart when bAutodraw is true.
+-- Hard-gated to White: autodraw is a human-assist feature, never for other seats.
 function triggerAutodraw(sColor)
+  if sColor ~= "White" then return end
   if not mainDeck then return end
 
   -- Random 1–3 second pause before drawing (feels more natural).
@@ -510,10 +532,15 @@ function triggerAutodraw(sColor)
 end
 
 -- Toggle handler for the Autodraw checkbox in the Action Panel.
+-- Always targets White: this toggle lives exclusively in the White-only panel.
+-- Never use player.color here — TTS fires this callback with whoever is currently
+-- seated when the panel is activated/deactivated, which leaks into other players.
 function click_ToggleAutodraw(player, value)
-  local sColor = player.color
-  if playerStuff[sColor] then
-    playerStuff[sColor].bAutodraw = (value == "True")
+  if gSuppressToggleCallbacks then return end
+  local ps = playerStuff["White"]
+  if ps then
+    ps.bAutodraw = (value == "True")
+    printToColor("Autodraw " .. (value == "True" and "ON" or "OFF"), "White")
   end
 end
 
@@ -734,6 +761,11 @@ gAutoExecWaitId  = nil
 gAutoExecEnabled = false
 -- Tracks the Enhance toggle state; set by click_ToggleEnhance.
 gEnhanceEnabled = true
+-- Tracks whether the expandable ActionPanel buttons are visible.
+gActionPanelExpanded = false
+-- True during startup/load to suppress XML UI toggle callbacks (which fire with
+-- the XML-default isOn="false" and would overwrite preferences restored from save).
+gSuppressToggleCallbacks = true
 
 local AUTOEXEC_BAR_WIDTH = 404  -- must match progressBarBg width in XML
 local AUTOEXEC_TICK      = 0.05 -- seconds per tick (20 ticks/sec)
@@ -977,41 +1009,98 @@ end
 
 -- Populate and show the PlanResultPanel with a composed plan result.
 -- Starts the auto-exec countdown if the Auto Exec toggle is on.
--- Uses a shorter 3-6 s window when the player has no melds on the table yet
--- (less to read), and the normal 5-8 s window once melds are established.
+-- Hide the plan panel safely even when the mouse is held on it.
+-- Setting raycastTarget=false removes the panel from Unity's hit-testing chain,
+-- forcing the EventSystem to release any IDragHandler pointer capture on the next
+-- frame — even if the mouse button is still held.  After one frame (0.05 s) we
+-- call SetActive(false); the capture is already gone so no state is corrupted.
+-- raycastTarget is restored to true immediately after so the next SetActive(true)
+-- finds the element fully ready for interaction.
+-- Default screen position for the plan panel (matches XML offsetXY).
+local PLAN_PANEL_DEFAULT_OFFSET = "280 -160"
+
+local function hidePlanPanel(onDone)
+  cancelAutoExecTimer()
+  -- Snap the panel back to its default position BEFORE deactivating.
+  -- TTS's drag component stores isDragging=true and a drag-offset vector as
+  -- instance variables that survive active=false/true cycles (OnDisable does NOT
+  -- reset them).  When the panel reactivates it wakes up still "dragging" and
+  -- routes all pointer events to itself — buttons are visible but unclickable.
+  -- Explicitly setting offsetXY forces TTS to recalculate the drag component's
+  -- internal state from the new anchor, effectively ending the drag gesture.
+  -- allowDragging=false and raycastTarget=false are belt-and-suspenders on top.
+  UI.setAttribute("PlanResultPanel", "offsetXY", PLAN_PANEL_DEFAULT_OFFSET)
+  UI.setAttribute("PlanResultPanel", "allowDragging", "false")
+  UI.setAttribute("PlanResultPanel", "raycastTarget", "false")
+  Wait.time(function()
+    UI.setAttribute("PlanResultPanel", "active", "false")
+    UI.setAttribute("progressBarFill", "width", "0")
+    if onDone then onDone() end
+  end, 0.15)
+end
+
+local function showPlanPanelActive()
+  -- Always show at the default position so a mid-drag deactivation can never
+  -- leave the panel at an unexpected offset when it reappears.
+  UI.setAttribute("PlanResultPanel", "offsetXY", PLAN_PANEL_DEFAULT_OFFSET)
+  UI.setAttribute("PlanResultPanel", "allowDragging", "false")
+  UI.setAttribute("PlanResultPanel", "raycastTarget", "true")
+  UI.setAttribute("PlanResultPanel", "active", "true")
+  -- Re-enable dragging after the panel has fully settled so TTS builds a fresh
+  -- drag component with no stale state from the previous gesture.
+  Wait.time(function()
+    UI.setAttribute("PlanResultPanel", "allowDragging", "true")
+  end, 0.3)
+end
+
 function showPlanPanel(plan)
-  -- Hide and reset position first.  Then defer the re-show by 0.05 s so the
-  -- active=false and active=true calls land in DIFFERENT Unity frames.  Setting
-  -- them in the same frame can be treated as a no-op, leaving any stuck
-  -- pointer-capture state intact and causing click-through on the re-shown panel.
-  UI.setAttribute("PlanResultPanel", "active", "false")
-  UI.setAttribute("PlanResultPanel", "offsetXY", "0 0")
-  UI.setAttribute("progressBarFill", "width", "0")
+  -- Hard gate: the plan panel and auto-exec are White-only features.
+  if not plan or plan.color ~= "White" then return end
   local displayText = planDisplayText(plan)
   table.insert(gPlanHistory, 1, displayText)
   if #gPlanHistory > 5 then gPlanHistory[6] = nil end
   gPlanHistoryIdx = 1
-  UI.setAttribute("PlanResultText", "text", displayText)
   local capturedPlan = plan
-  Wait.time(function()
-    UI.setAttribute("PlanResultPanel", "active", "true")
-    updatePlanNavButtons()
-    if gAutoExecEnabled then
-      local state       = capturedPlan and capturedPlan.state
-      local noMelds     = not state or #state.melds == 0
-      local hasFoot     = state and state.hasFoot
-      local discardOnly = capturedPlan and #(capturedPlan.melds or {}) == 0
-                                       and #(capturedPlan.wildAllocs or {}) == 0
-      local smallHand   = state and not hasFoot and (state.handCount or 99) <= 5
-      if discardOnly or smallHand then
-        startAutoExecTimer(0.5, 2)
-      elseif noMelds or hasFoot then
-        startAutoExecTimer(2, 4)
-      else
-        startAutoExecTimer(5, 8)
+  hidePlanPanel(function()
+    UI.setAttribute("PlanResultText", "text", displayText)
+    -- One extra frame between active=false and active=true so Unity fully
+    -- processes the deactivation before we re-enable the panel.
+    Wait.time(function()
+      showPlanPanelActive()
+      updatePlanNavButtons()
+      if gAutoExecEnabled then
+        local state       = capturedPlan and capturedPlan.state
+        local noMelds     = not state or #state.melds == 0
+        local hasFoot     = state and state.hasFoot
+        local discardOnly = capturedPlan and #(capturedPlan.melds or {}) == 0
+                                         and #(capturedPlan.wildAllocs or {}) == 0
+        local smallHand   = state and not hasFoot and (state.handCount or 99) <= 5
+        if discardOnly or smallHand then
+          startAutoExecTimer(0.5, 2)
+        elseif noMelds or hasFoot then
+          startAutoExecTimer(2, 4)
+        else
+          startAutoExecTimer(5, 8)
+        end
       end
+    end, 0.05)
+  end)
+end
+
+-- Emergency recovery: re-open the plan panel with the current plan.
+function click_FixPlanPanel(player)
+  local savedResult = gPlanResult
+  local displayText = gPlanHistory[gPlanHistoryIdx] or ""
+  hidePlanPanel(function()
+    UI.setAttribute("PlanResultText", "text", displayText)
+    if savedResult then
+      Wait.time(function()
+        gPlanResult = savedResult
+        showPlanPanelActive()
+        updatePlanNavButtons()
+      end, 0.05)
     end
-  end, 0.05)
+  end)
 end
 
 -- Build the turn plan, populate the result panel, and show it.
@@ -1019,11 +1108,11 @@ end
 function click_ActionPlan(player)
   local sColor = player.color
   if UI.getAttribute("PlanResultPanel", "active") == "true" then
-    cancelAutoExecTimer()
-    if gPlanResult then executeTurnPlan(gPlanResult) end
-    UI.setAttribute("PlanResultPanel", "active", "false")
-    UI.setAttribute("PlanResultPanel", "offsetXY", "0 0")
+    local capturedPlan = gPlanResult
     gPlanResult = nil
+    hidePlanPanel(function()
+      if capturedPlan then executeTurnPlan(capturedPlan) end
+    end)
     return
   end
   gPlanResult = buildTurnPlan(sColor)
@@ -1031,6 +1120,9 @@ function click_ActionPlan(player)
 end
 
 -- Track the Auto Exec toggle state in a Lua variable (avoids UI.getAttribute casing issues).
+-- No suppression: gAutoExecEnabled is a global with no per-player contamination risk.
+-- Suppressing it caused silent failures when the toggle was clicked during the 2.5 s
+-- init window or the 0.5 s per-turn-start window.
 function click_ToggleAutoExec(player, value)
   gAutoExecEnabled = (value == "True")
 end
@@ -1040,6 +1132,18 @@ function click_ToggleEnhance(player, value)
   gEnhanceEnabled = (value == "True")
 end
 
+-- Show/hide the five extra action buttons (Play Hand, Layout All Hand, etc.).
+function click_ToggleActionExpanded(player)
+  gActionPanelExpanded = not gActionPanelExpanded
+  local active = gActionPanelExpanded and "true" or "false"
+  local ids = {"btnPlayHand","btnLayoutAllHand","btnPlayAndLay","btnDrawSortPlayLay","btnDiscard"}
+  for _, id in ipairs(ids) do
+    UI.setAttribute(id, "active", active)
+  end
+  UI.setAttribute("btnToggleActionExpanded", "text", gActionPanelExpanded and "▲ Less" or "▼ More")
+  UI.setAttribute("ActionSubPanel", "height", gActionPanelExpanded and "415" or "230")
+end
+
 -- Stop the auto-exec countdown but leave the panel open for manual action.
 function click_PlanStop(player)
   cancelAutoExecTimer()
@@ -1047,10 +1151,8 @@ end
 
 -- Close the plan result panel without executing.
 function click_PlanClose(player)
-  cancelAutoExecTimer()
-  UI.setAttribute("PlanResultPanel", "active", "false")
-  UI.setAttribute("PlanResultPanel", "offsetXY", "0 0")
   gPlanResult = nil
+  hidePlanPanel()
 end
 
 -- Send the plan text to the clicking player's chat so they can select/copy it.
@@ -1064,14 +1166,14 @@ function click_PlanCopy(player)
 end
 
 -- Execute the stored plan, then close the panel.
+-- raycastTarget=false in hidePlanPanel releases any IDragHandler capture before
+-- SetActive(false), so this is safe regardless of whether the mouse is held.
 function click_PlanExecute(player)
-  cancelAutoExecTimer()
-  UI.setAttribute("PlanResultPanel", "active", "false")
-  UI.setAttribute("PlanResultPanel", "offsetXY", "0 0")
-  if gPlanResult then
-    executeTurnPlan(gPlanResult)
-    gPlanResult = nil
-  end
+  local capturedPlan = gPlanResult
+  gPlanResult = nil
+  hidePlanPanel(function()
+    if capturedPlan then executeTurnPlan(capturedPlan) end
+  end)
 end
 
 -- =============================================================================
@@ -1130,12 +1232,25 @@ function click_NewGameSure(_, color)
   if (#playerList<2 or #playerList>4) then
     broadcastToAll("Only 2-4 players are supported.","Yellow")
     return
-  else
-    gbDealing=true
-    mainDeck = initializeHand()
-    Wait.time(function() initializeVariables() dealDeck(mainDeck) end, 1.0)
-    debug("md1: " .. mainDeck.guid)
   end
+
+  -- Safety check: if White's hand already has 13 cards, cards have probably
+  -- already been dealt this hand.  Refuse and warn loudly rather than dealing twice.
+  local whiteHandCount = 0
+  pcall(function() whiteHandCount = #Player["White"].getHandObjects() end)
+  if whiteHandCount == 13 then
+    broadcastToAll("!!! WHITE HAS 13 CARDS IN HAND — ALREADY DEALT? !!!", "Red")
+    broadcastToAll("Deal cancelled.  Clear the table before starting a new hand.", "Red")
+    broadcastToAll("!!! WHITE HAS 13 CARDS IN HAND — ALREADY DEALT? !!!", "Red")
+    giNewgameCountdown = 0
+    setButtons()
+    return
+  end
+
+  gbDealing=true
+  mainDeck = initializeHand()
+  Wait.time(function() initializeVariables() dealDeck(mainDeck) end, 1.0)
+  debug("md1: " .. mainDeck.guid)
 end
 
 -- =============================================================================
@@ -2105,6 +2220,17 @@ function onLoad(saved_data)
       end
     end
   end
+
+  -- Sync the Autodraw toggle UI to match the restored (or default) White pref, then
+  -- release the suppression flag so subsequent user interactions work normally.
+  -- The 2.0 s delay lets TTS finish its own XML-UI initialization callbacks first.
+  Wait.time(function()
+    if playerStuff and playerStuff["White"] then
+      UI.setAttribute("toggleAutodraw", "isOn",
+        playerStuff["White"].bAutodraw and "True" or "False")
+    end
+    Wait.time(function() gSuppressToggleCallbacks = false end, 0.5)
+  end, 2.0)
 
     processSortCommand("White", playerStuff["White"].sSortMetaOrder)
     processSortCommand("Red", playerStuff["Red"].sSortMetaOrder)
@@ -5076,18 +5202,12 @@ function evalMeldsToPlay(state, anyOpponentNearGoOut)
                 reason = string.format("new red meld: %d cards of rank %s (book exists; independent meld)",
                   count, rank)
               else
-                -- count < 3: can't start a new meld; extend book only under urgency.
-                --   hasFoot      — pre-foot; may need to empty hand to pick up foot
-                --   canGoOut     — post-foot 2r+2b; trying to empty hand to go out
-                --   oppNearGoOut — opponent has 3 of 4 required books (one from winning)
-                local allowExtend = state.hasFoot or state.canGoOut or anyOpponentNearGoOut
-                if not allowExtend then
-                  skip = true
-                else
-                  priority = 5
-                  reason = string.format("extends %s book: %d on table + %d from hand",
-                    meldColor, existingCount, count)
-                end
+                -- count < 3: can't start a new meld; play onto existing book at p5.
+                -- Priority 5 = lowest; the hand-count pruning (≥2 cards after plays)
+                -- will trim this if it would leave the hand too small.
+                priority = 5
+                reason = string.format("extends %s book: %d on table + %d from hand",
+                  meldColor, existingCount, count)
               end
             else
               priority = 3
@@ -5262,6 +5382,15 @@ function evalDiscard(state, meldPlan, wildAllocs, logFn)
   --   surplus        — held rank with 2+ copies remaining; can discard one, keep the rest
   --   protected      — rank has meld but is not held for black book
   --   superProtected — held rank with exactly 1 copy; discard only to avoid wild discard
+  -- Build a rank→bool lookup covering all completed books (red/black/wild).
+  -- meldsByRank only holds open (non-book) melds, so books need a separate check.
+  local bookRanks = {}
+  for _, btype in ipairs({"red", "black", "wild"}) do
+    for _, b in ipairs(state.books[btype]) do
+      if b.rank then bookRanks[b.rank] = true end
+    end
+  end
+
   local unprotected, surplus, protected, superProtected = {}, {}, {}, {}
   for _, card in ipairs(candidates) do
     if holdRanks[card.rank] then
@@ -5270,7 +5399,7 @@ function evalDiscard(state, meldPlan, wildAllocs, logFn)
       else
         table.insert(superProtected, card)
       end
-    elseif state.meldsByRank[card.rank] then
+    elseif state.meldsByRank[card.rank] or bookRanks[card.rank] then
       table.insert(protected, card)
     else
       table.insert(unprotected, card)
@@ -5512,6 +5641,9 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
           if hc.color == "Black" then mc.hasBlack = true end
         end
         melds[m.rank].total = melds[m.rank].total + m.count
+        -- Guard: a meld completing a red book this turn must not receive a wild
+        -- (that would convert our new red book to black, breaking the 2-red requirement).
+        if m.priority == 1 then melds[m.rank].completingRedBook = true end
       else
         -- New meld: compute colors from the hand cards being played.
         local mc = {hasRed=false, hasBlack=false}
@@ -5841,8 +5973,9 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
     if m.total >= 7 then
       -- Normally can't extend a completed meld.  Exception: a rank meld that is all-natural
       -- (wilds==0) can accept one wild to convert it from a red book to a black book —
-      -- but only when we still need a black book to meet the go-out requirement.
-      if m.wilds == 0 and not m.isWildMeld and needBlackBook then
+      -- but only when we still need a black book AND the meld isn't completing as a red
+      -- book this same turn (adding a wild would lose the needed red book).
+      if m.wilds == 0 and not m.isWildMeld and needBlackBook and not m.completingRedBook then
         -- fall through to standard checks below
       else
         return false
@@ -5970,12 +6103,12 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
           -- Never add a partial wild to an existing wild meld — keep it for rank/black books.
           local wildBookComplete = m.isWildMeld
             and (combinedWildOnTable + math.min(wildsLeft, 7 - combinedWildOnTable) >= 7)
-          -- Require 2 actual red books on the table (not projected) before converting a
-          -- 0-wild rank meld to black.  projRedVal counts books being made this same turn,
-          -- but those aren't on the table yet — wait until the next turn to use wilds.
+          -- Allow when ≥2 red books are projected this turn (projRedVal counts books
+          -- completed by natural plays earlier in the same turn).  Execution order
+          -- guarantees natural melds land before wilds, so projRedVal is reliable here.
           local eligible = (not suppressWildBook and m.isWildMeld and wildBookComplete)
                         or (not m.isWildMeld and (not needBlackBook
-                            or (state.bookCounts.red >= 2 and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)))
+                            or (projRedVal >= 2 and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk)))
           if eligible then table.insert(preExisting, rank) end
         end
       end
@@ -6016,9 +6149,9 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
                 "completes wild book (combined %d on table + %d hand → 7)", combinedWildOnTable, neededForBook))
               addedToWild = addedToWild + 1
             end
-          elseif not m.isWildMeld and state.bookCounts.red >= 2
+          elseif not m.isWildMeld and projRedVal >= 2
               and (m.total + math.min(wildsLeft, 2 - m.wilds) >= 7) and colorOk then
-            -- Guard: only convert rank melds to black books once 2 red books are on the table.
+            -- Guard: only convert rank melds to black books when ≥2 red books are projected.
             -- Cap at 2 projected black books: making more black books wastes wilds that could
             -- go into a wild meld, and extra black books don't help reach go-out sooner.
             if state.bookCounts.black + projBlackPhase2 >= 2 then
@@ -6269,7 +6402,7 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
         local eligible   = wildMeldOk
                         and colorOk5
                         and postFootRankOk(m)
-                        and (m.isWildMeld or freePlace or not needBlackBook or state.bookCounts.red >= 2)
+                        and (m.isWildMeld or freePlace or not needBlackBook or projRedVal >= 2)
         if eligible then table.insert(candidates, m) end
       end
     end
@@ -6352,25 +6485,23 @@ function buildTurnPlan(sColor)
   local hadMeldPlans = (#melds > 0)
 
   -- Cap red-book completions when we still need black books.
-  -- Base rule: keep total projected reds ≤ 2 (the go-out minimum).
-  -- Exception: allow more reds when enough open melds remain for black books.
-  --   After making the extra reds, at least 3 open melds must remain on the table
-  --   (2 for guaranteed black books + 1 spare so one can be extended this turn).
-  --   Formula: redCap = max(baseExtra, openMeldCount - 3)
-  -- For capped (demoted) melds: fill naturals up to 6 (leaving room for 1 wild to
-  --   complete the black book later).  If already at 6+, skip entirely — Phase 2
-  --   will add the wild directly.
-  -- Lifted when black books >= 2 (go-out requirement already met).
-  -- Only applies: post-foot + black < 2 + red < 2 on table.
-  if not state.hasFoot and state.bookCounts.black < 2 and state.bookCounts.red < 2 then
-    local baseExtra = 2 - state.bookCounts.red  -- p1 plays needed to reach 2 total reds
+  -- Rule: after any red-book plays this turn, at least (2 - blackBooks) open melds
+  -- must remain on the table for later black-book conversion.
+  --   blackNeeded = 2 - state.bookCounts.black  (1 or 2)
+  --   redCap      = max(0, openMeldCount - blackNeeded)
+  -- Example: 3 open melds, 1 black book → blackNeeded=1, redCap=2 (keep 1 for black).
+  -- Example: 2 open melds, 0 black books → blackNeeded=2, redCap=0 (keep both for black).
+  -- Lifted entirely when black books >= 2 (go-out requirement already met).
+  -- For demoted plays: fill naturals up to 6 (leaving room for 1 wild to complete black).
+  --   If already at 6+, skip entirely — Phase 2 adds the wild directly.
+  if not state.hasFoot and state.bookCounts.black < 2 then
+    local blackNeeded = 2 - state.bookCounts.black
 
     -- Count open (non-book) meld groups currently on the table.
     local openMeldCount = 0
     for _ in pairs(state.meldsByRank) do openMeldCount = openMeldCount + 1 end
 
-    -- Allow extra reds beyond base only if 3+ melds will remain after those reds are made.
-    local redCap = math.max(baseExtra, openMeldCount - 3)
+    local redCap = math.max(0, openMeldCount - blackNeeded)
 
     local p1Seen = 0
     local cappedMelds = {}
@@ -6619,129 +6750,120 @@ function buildTurnPlan(sColor)
     end
   end
 
-  -- Go-out via additional melds: books met but projHandCount > 1.
-  -- Covers: (A) wild meld when only wilds + 0-1 naturals remain,
-  --         (B) new rank melds from pairs of same-rank naturals filled with wilds,
-  --         leaving exactly 1 natural to discard and 0 wilds unused (or ≥3 for wild meld).
+  -- Go-out via new wild meld: books are met but projHandCount > 1 because remaining
+  -- cards are all wilds plus exactly one natural (the discard).  Play all remaining
+  -- wilds as a new wild meld so the natural becomes the discard and the hand empties.
   if not state.hasFoot and projRed >= 2 and projBlack >= 2 and projHandCount > 1 then
-    local usedByRank = {}
     local wildConsumed = 0
-    for _, m  in ipairs(melds)      do usedByRank[m.rank] = (usedByRank[m.rank] or 0) + m.count end
-    for _, wa in ipairs(wildAllocs) do
-      wildConsumed = wildConsumed + #wa.wilds
-      if wa.rank and wa.rank ~= "__wild__" then
-        usedByRank[wa.rank] = (usedByRank[wa.rank] or 0) + #wa.naturalCards
-      end
-    end
-    local wildRem = state.wildCount - wildConsumed
-
-    local remByRank = {}
-    local totalNat = 0
-    for rank, total in pairs(state.handByRank) do
-      local r = total - (usedByRank[rank] or 0)
-      if r > 0 then remByRank[rank] = r; totalNat = totalNat + r end
-    end
-
-    local cand = nil
-
-    -- Case A: all remaining are wilds (totalNat=0) → pure wild meld, projHand→0
-    if not cand and totalNat == 0 and wildRem >= 3 then
-      cand = {discardRank=nil, rankMelds={}, wildMeld=true, extraWilds=wildRem}
-    end
-    -- Case A': wild meld + 1 natural discard
-    if not cand and totalNat == 1 and wildRem >= 3 then
-      cand = {discardRank=next(remByRank), rankMelds={}, wildMeld=true, extraWilds=wildRem}
-    end
-    -- Case B: try each natural as discard; remaining naturals must all be in groups of 2+
-    if not cand then
-      for discardRank in pairs(remByRank) do
-        local rankMelds = {}
-        local wildsNeeded = 0
-        local ok = true
-        for rank, cnt in pairs(remByRank) do
-          local c = cnt - (rank == discardRank and 1 or 0)
-          if   c == 1 then ok = false; break
-          elseif c >= 2 then
-            rankMelds[rank] = c
-            wildsNeeded = wildsNeeded + math.max(0, 3 - c)
-          end
-        end
-        if ok and wildsNeeded <= wildRem then
-          local extra = wildRem - wildsNeeded
-          -- Extra wilds must go somewhere: absorbed into rank melds (≤2 per meld) or wild meld.
-          local absorbCap = 0
-          for _, cnt in pairs(rankMelds) do absorbCap = absorbCap + (2 - math.max(0, 3 - cnt)) end
-          if extra == 0 or extra >= 3 or extra <= absorbCap then
-            cand = {discardRank=discardRank, rankMelds=rankMelds,
-                    wildMeld=(extra >= 3), wildsNeeded=wildsNeeded, extraWilds=extra}
-            break
-          end
-        end
-      end
-    end
-
-    if cand then
-      -- Collect available wild objects (not already in a planned alloc)
-      local usedWildGuids = {}
+    for _, wa in ipairs(wildAllocs) do wildConsumed = wildConsumed + #wa.wilds end
+    local wildRemaining    = state.wildCount - wildConsumed
+    local naturalRemaining = projHandCount - wildRemaining
+    if naturalRemaining == 1 and wildRemaining >= 3 then
+      local allocedGuids = {}
       for _, wa in ipairs(wildAllocs) do
         for _, wc in ipairs(wa.wilds) do
-          pcall(function() usedWildGuids[wc.obj.getGUID()] = true end)
+          pcall(function() allocedGuids[wc.obj.getGUID()] = true end)
         end
       end
-      local avWilds = {}
+      local wildsLeft = {}
       for _, card in ipairs(state.hand) do
         if card.color == "Wild" then
           local guid; local ok = pcall(function() guid = card.obj.getGUID() end)
-          if ok and guid and not usedWildGuids[guid] then table.insert(avWilds, card) end
+          if ok and guid and not allocedGuids[guid] then
+            table.insert(wildsLeft, card)
+          end
         end
       end
-
-      local wi = 1
-      local assignedRank = {}
-
-      for rank, cnt in pairs(cand.rankMelds) do
-        local baseW = math.max(0, 3 - cnt)
-        local extra = math.min(2 - baseW, cand.extraWilds or 0)
-        cand.extraWilds = (cand.extraWilds or 0) - extra
-        local meldWilds = {}
-        for i = 1, baseW + extra do
-          if wi <= #avWilds then table.insert(meldWilds, avWilds[wi]); wi = wi + 1 end
+      if #wildsLeft >= 3 then
+        table.insert(wildAllocs, {
+          rank="__wild__", wilds=wildsLeft, naturalCards={},
+          meldObj=nil, isNew=true, isWildMeld=true,
+          completesBook=false, naturalsAlreadyPlaced=false, priority=4,
+          reason=string.format("go-out: new wild meld (%d wilds)", #wildsLeft),
+        })
+        cardsConsumed = cardsConsumed + #wildsLeft
+        projHandCount = state.handCount - cardsConsumed
+        L(string.format("  [go-out wild meld] %d wilds → new wild meld, 1 natural left to discard",
+          #wildsLeft))
+      end
+    elseif naturalRemaining == 1 and wildRemaining >= 1 then
+      -- Case A3: 1 natural remains as the discard; place 1-2 unallocated wilds on
+      -- existing open rank melds to empty the hand.
+      local allocedGuids = {}
+      for _, wa in ipairs(wildAllocs) do
+        for _, wc in ipairs(wa.wilds) do
+          pcall(function() allocedGuids[wc.obj.getGUID()] = true end)
         end
-        local natCards = {}
-        for _, card in ipairs(state.hand) do
-          if card.rank == rank and card.color ~= "Wild" then
-            local planUsed = (usedByRank[rank] or 0) + (assignedRank[rank] or 0)
-            if planUsed < (state.handByRank[rank] or 0) then
-              table.insert(natCards, card)
-              assignedRank[rank] = (assignedRank[rank] or 0) + 1
-              if #natCards == cnt then break end
+      end
+      local wildsToPlace = {}
+      for _, card in ipairs(state.hand) do
+        if card.color == "Wild" then
+          local guid; local ok = pcall(function() guid = card.obj.getGUID() end)
+          if ok and guid and not allocedGuids[guid] then
+            table.insert(wildsToPlace, card)
+          end
+        end
+      end
+      if #wildsToPlace >= wildRemaining then
+        local openMelds = {}
+        for rank, meldInfo in pairs(state.meldsByRank) do
+          local isBook = false
+          for _, btype in ipairs({"red", "black"}) do
+            for _, b in ipairs(state.books[btype]) do
+              if b.rank == rank then isBook = true; break end
+            end
+            if isBook then break end
+          end
+          if not isBook and meldInfo.count < 7 then
+            local wildCt = 0
+            pcall(function() wildCt = countMeldWilds(meldInfo.obj) end)
+            wildCt = wildCt + (meldInfo.embeddedWilds or 0)
+            local allocWilds = 0
+            for _, wa in ipairs(wildAllocs) do
+              if wa.rank == rank then allocWilds = allocWilds + #wa.wilds end
+            end
+            if wildCt + allocWilds < 2 then
+              table.insert(openMelds, {rank=rank, meldInfo=meldInfo,
+                wilds=wildCt+allocWilds, total=meldInfo.count})
             end
           end
         end
-        table.insert(wildAllocs, {
-          rank=rank, wilds=meldWilds, naturalCards=natCards,
-          meldObj=nil, isNew=true, isWildMeld=false,
-          completesBook=false, naturalsAlreadyPlaced=false,
-        })
-        cardsConsumed = cardsConsumed + #natCards + #meldWilds
-      end
-
-      if cand.wildMeld then
-        local wmCards = {}
-        for i = wi, #avWilds do table.insert(wmCards, avWilds[i]) end
-        if #wmCards >= 3 then
-          table.insert(wildAllocs, {
-            rank="__wild__", wilds=wmCards, naturalCards={},
-            meldObj=nil, isNew=true, isWildMeld=true,
-            completesBook=false, naturalsAlreadyPlaced=false,
-          })
-          cardsConsumed = cardsConsumed + #wmCards
+        table.sort(openMelds, function(a, b)
+          if a.total ~= b.total then return a.total > b.total end
+          return a.wilds < b.wilds
+        end)
+        local placed = 0
+        for _, dest in ipairs(openMelds) do
+          if placed >= wildRemaining then break end
+          local canAbsorb = math.min(2 - dest.wilds, wildRemaining - placed)
+          for i = 1, canAbsorb do
+            local wc = wildsToPlace[placed + 1]
+            if not wc then break end
+            local existingAlloc = nil
+            for _, wa in ipairs(wildAllocs) do
+              if wa.rank == dest.rank then existingAlloc = wa; break end
+            end
+            if existingAlloc then
+              table.insert(existingAlloc.wilds, wc)
+            else
+              table.insert(wildAllocs, {
+                rank=dest.rank, wilds={wc}, naturalCards={},
+                meldObj=dest.meldInfo.obj, isNew=false, isWildMeld=false,
+                completesBook=false, naturalsAlreadyPlaced=true, priority=4,
+                reason=string.format("go-out: extends %s meld (1 wild to empty hand)", dest.rank),
+              })
+            end
+            placed = placed + 1
+            dest.wilds = dest.wilds + 1
+          end
+        end
+        if placed >= wildRemaining then
+          cardsConsumed = cardsConsumed + placed
+          projHandCount = state.handCount - cardsConsumed
+          L(string.format("  [go-out A3] placed %d wild(s) on existing meld(s), 1 natural left to discard",
+            placed))
         end
       end
-
-      projHandCount = state.handCount - cardsConsumed
-      L(string.format("  [go-out ext] discard=%s → new melds, projHand=%d",
-        tostring(cand.discardRank), projHandCount))
     end
   end
 
@@ -7008,9 +7130,11 @@ function buildTurnPlan(sColor)
       local tryConsumed = 0
       for _, m  in ipairs(tryMelds)  do tryConsumed = tryConsumed + m.count end
       local tryProjHand = state.handCount - tryConsumed
-      -- Wild allocs are only kept if they empty the hand; otherwise clear them.
+      -- Recompute wild allocs when the hand would be nearly empty OR when we're
+      -- building black books (allowWilds is true for the needsBlackBooks path).
+      local tryNeedsBlacks = not state.hasFoot and projRedFromMelds >= 2 and state.bookCounts.black < 2
       local tryWA = {}
-      if tryProjHand <= 1 then
+      if tryProjHand <= 1 or tryNeedsBlacks then
         tryWA = evalWildAllocations(state, tryMelds, function() end, projRedFromMelds)
         for _, wa in ipairs(tryWA) do
           tryConsumed = tryConsumed + #wa.wilds + #wa.naturalCards
@@ -7020,10 +7144,37 @@ function buildTurnPlan(sColor)
       local tryDiscard = evalDiscard(state, tryMelds, tryWA, L)
       if tryDiscard.card and tryDiscard.card.color ~= "Wild" then
         L(string.format("Pruned %s meld (kept naturals to avoid discarding wild)", entry.m.rank))
-        melds       = tryMelds
-        wildAllocs  = tryWA
-        discard     = tryDiscard
+        melds         = tryMelds
+        wildAllocs    = tryWA
+        discard       = tryDiscard
         projHandCount = tryProjHand
+        -- Re-check go-out: pruning + recomputed wilds may complete 2 black books.
+        if not goOut.should and not state.hasFoot and projHandCount <= 1 then
+          local newProjBlack = state.bookCounts.black
+          local counted = {}
+          for _, wa in ipairs(wildAllocs) do
+            if not wa.isWildMeld and wa.rank and #wa.wilds > 0 and not counted[wa.rank] then
+              local mi = state.meldsByRank[wa.rank]
+              local baseTotal = mi and (mi.count + (mi.embeddedWilds or 0)) or 0
+              for _, m in ipairs(melds) do
+                if m.rank == wa.rank then baseTotal = baseTotal + m.count end
+              end
+              local totalWilds = 0
+              for _, wa2 in ipairs(wildAllocs) do
+                if wa2.rank == wa.rank then totalWilds = totalWilds + #wa2.wilds end
+              end
+              if baseTotal + totalWilds >= 7 then
+                counted[wa.rank] = true
+                newProjBlack = newProjBlack + 1
+              end
+            end
+          end
+          if projRedFromMelds >= 2 and newProjBlack >= 2 then
+            goOut = {should=true, reason=string.format(
+              "empties hand after meld pruning (red=%d black=%d)", projRedFromMelds, newProjBlack)}
+            L("Go out: YES (after meld pruning) — " .. goOut.reason)
+          end
+        end
         break
       end
     end
@@ -7172,6 +7323,30 @@ function executeTurnPlan(plan)
     return ENHANCE_PAUSE_MIN + math.random() * (ENHANCE_PAUSE_MAX - ENHANCE_PAUSE_MIN)
   end
 
+  -- When a collection of meld objects totals 7+ cards, stack them so TTS merges
+  -- them into a single Deck and checkAndMoveBooks can find and rotate it.
+  -- For < 7 cards, fall through to spread4 as before.
+  local function stackOrSpread(objs, stackPos)
+    local totalQty = 0
+    for _, obj in ipairs(objs) do
+      local q = 1
+      pcall(function() local qq = obj.getQuantity(); if qq and qq >= 1 then q = qq end end)
+      totalQty = totalQty + q
+    end
+    if totalQty >= 7 then
+      for _, obj in ipairs(objs) do
+        pcall(function() obj.setPosition(stackPos) end)
+      end
+      Wait.time(function()
+        pcall(function() checkAndMoveBooks(sColor) end)
+      end, 2.5)
+    else
+      local anchorPos
+      pcall(function() anchorPos = objs[1].getPosition() end)
+      spread4(sColor, anchorPos or stackPos, objs)
+    end
+  end
+
   -- Natural meld plays (staggered so computeNewLinePosition sees placed cards correctly).
   -- Pass skipOpeningCheck=true: evalMeldsToPlay already verified the combined total.
   local t = 0
@@ -7199,40 +7374,31 @@ function executeTurnPlan(plan)
             dt = dt + 0.15
           end
           local capturedPos   = pos
-          local capturedCards = capturedM.cards   -- placed cards; always include them
           Wait.time(function()
             pcall(function()
               local allObjs = getMeldColumnObjects(sColor, capturedM.rank)
               local safe = {}
-              local safeGuids = {}
               for _, obj in ipairs(allObjs) do
-                -- Exclude completed books (qty≥7): a same-rank book in a side zone
-                -- must not be swept into the open meld column by spread4.
+                -- Exclude completed books (qty≥7): already merged; checkAndMoveBooks handles them.
+                -- Do NOT access capturedM.cards[i].obj here — TTS merges placed cards into a Deck
+                -- immediately, invalidating individual Card references and causing
+                -- "Object reference not set" C# errors that escape pcall.
                 local qty = 1
                 pcall(function() qty = obj.getQuantity() end)
                 if qty < 7 and pcall(function() obj.getPosition() end) then
                   table.insert(safe, obj)
-                  pcall(function() safeGuids[obj.getGUID()] = true end)
-                end
-              end
-              -- Always include the placed cards directly; zone scan may lag a frame.
-              for i = 1, capturedM.count do
-                local entry = capturedCards[i]
-                if entry then
-                  local guid; local ok = pcall(function() guid = entry.obj.getGUID() end)
-                  if ok and guid and not safeGuids[guid] then
-                    if pcall(function() entry.obj.getPosition() end) then
-                      table.insert(safe, entry.obj)
-                    end
-                  end
                 end
               end
               if #safe > 0 then
                 local anchorPos
                 pcall(function() anchorPos = safe[1].getPosition() end)
-                spread4(sColor, anchorPos or capturedPos, safe)
+                stackOrSpread(safe, anchorPos or capturedPos)
               end
             end)
+            -- Unconditional book check: if all 7 cards merged before the zone scan
+            -- ran, safe is empty but checkAndMoveBooks finds the Deck(qty≥7) directly.
+            Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+            Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 4.5)
           end, dt + 1.0)
         end)
       end, t)
@@ -7242,7 +7408,7 @@ function executeTurnPlan(plan)
       local capturedRank = m.rank
       local capturedGoingOut = plan.goOut and plan.goOut.should or false
       Wait.time(function()
-        layoutHandRank(sColor, capturedRank, true, true, capturedGoingOut)
+        layoutHandRank(sColor, capturedRank, true, true, capturedGoingOut, true)
       end, t)
       tAnimEnd = t + (m.count * 0.15) + 0.75
       t = tAnimEnd + enhancePause()
@@ -7271,38 +7437,46 @@ function executeTurnPlan(plan)
             end, dt)
             dt = dt + 0.15
           end
-          local capturedPos   = pos
-          local capturedWilds = capturedWa.wilds   -- placed wilds; always include them
+          local capturedPos = pos
           Wait.time(function()
             pcall(function()
+              -- Zone scan: finds natural rank cards + nearby wilds.
+              -- Do NOT loop over capturedWa.wilds references here — those card objects
+              -- are invalidated the moment TTS merges them into the existing meld Deck,
+              -- causing "Object reference not set" C# errors that escape pcall.
               local allObjs = getMeldColumnObjects(sColor, capturedRank)
               local safe = {}
-              local safeGuids = {}
+              local seenGuids = {}
               for _, obj in ipairs(allObjs) do
-                -- Exclude completed books (qty≥7): a same-rank book in a side zone
-                -- must not be swept into the open meld column by spread4.
                 local qty = 1
                 pcall(function() qty = obj.getQuantity() end)
                 if qty < 7 and pcall(function() obj.getPosition() end) then
-                  table.insert(safe, obj)
-                  pcall(function() safeGuids[obj.getGUID()] = true end)
-                end
-              end
-              -- Always include the placed wild cards directly; zone scan may lag a frame.
-              for _, card in ipairs(capturedWilds) do
-                local guid; local ok = pcall(function() guid = card.obj.getGUID() end)
-                if ok and guid and not safeGuids[guid] then
-                  if pcall(function() card.obj.getPosition() end) then
-                    table.insert(safe, card.obj)
+                  local guid; pcall(function() guid = obj.getGUID() end)
+                  if guid and not seenGuids[guid] then
+                    seenGuids[guid] = true
+                    table.insert(safe, obj)
                   end
                 end
               end
-              if #safe > 0 then
-                local anchorPos
-                pcall(function() anchorPos = safe[1].getPosition() end)
-                spread4(sColor, anchorPos or capturedPos, safe)
+              -- Proximity supplement for recently placed wilds not yet zone-registered.
+              local nearby = getCardsNearPos(sColor, capturedPos, 3.0)
+              for _, obj in ipairs(nearby) do
+                local qty = 1
+                pcall(function() qty = obj.getQuantity() end)
+                if qty < 7 then
+                  local guid; local ok = pcall(function() guid = obj.getGUID() end)
+                  if ok and guid and not seenGuids[guid] then
+                    seenGuids[guid] = true
+                    table.insert(safe, obj)
+                  end
+                end
               end
+              if #safe > 0 then stackOrSpread(safe, capturedPos) end
             end)
+            -- Unconditional book checks: if cards merged before the scan ran,
+            -- safe may be incomplete, but checkAndMoveBooks finds the Deck directly.
+            Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+            Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 4.5)
           end, dt + 1.0)
         end)
       end, t)
@@ -7344,7 +7518,7 @@ function executeTurnPlan(plan)
               for _, obj in ipairs(nearby) do
                 if pcall(function() obj.getPosition() end) then table.insert(safe, obj) end
               end
-              if #safe > 0 then spread4(sColor, capturedPos, safe) end
+              if #safe > 0 then stackOrSpread(safe, capturedPos) end
             end)
           end, dt + 1.0)
         end)
@@ -7378,37 +7552,47 @@ function executeTurnPlan(plan)
           local capturedPos = pos
           Wait.time(function()
             pcall(function()
-              local nearby = getCardsNearPos(sColor, capturedPos, 1.5)
-              local anchor = nil
-              for _, obj in ipairs(nearby) do
+              -- Zone scan primary (no Physics.cast / no stale-reference risk).
+              -- getMeldColumnObjects returns natural-rank cards + wilds embedded in
+              -- the same meld column.  For all-wild melds (Joker/2 rank) the Deck
+              -- has no natural rank so getMeldColumnObjects returns nothing — the
+              -- proximity supplement below picks it up instead.
+              local capturedRank = capturedWa.rank
+              local allObjs = getMeldColumnObjects(sColor, capturedRank)
+              local safe = {}
+              local seenGuids = {}
+              for _, obj in ipairs(allObjs) do
                 local qty = 1
                 pcall(function() qty = obj.getQuantity() end)
-                if qty < 7 then anchor = obj; break end
-              end
-              local safe = {}
-              if anchor then
-                safe = getMeldColumnForSweep(sColor, anchor)
-              else
-                -- Fallback: rank scan but filter to cards near the deposit position.
-                local capturedRank = capturedWa.rank
-                local rankObjs = getMeldColumnObjects(sColor, capturedRank)
-                for _, obj in ipairs(rankObjs) do
-                  local ok_p2, opos = pcall(function() return obj.getPosition() end)
-                  if ok_p2 and opos then
-                    local dx = opos.x - capturedPos.x
-                    local dz = opos.z - capturedPos.z
-                    if (dx*dx + dz*dz) <= 9.0 then   -- within 3 units
-                      table.insert(safe, obj)
-                    end
+                if qty < 7 then
+                  local guid; local ok = pcall(function() guid = obj.getGUID() end)
+                  if ok and guid and not seenGuids[guid] then
+                    seenGuids[guid] = true
+                    table.insert(safe, obj)
                   end
                 end
               end
-              if #safe > 0 then
-                local anchorPos
-                pcall(function() anchorPos = safe[1].getPosition() end)
-                spread4(sColor, anchorPos or capturedPos, safe)
+              -- Proximity supplement: catches all-wild Decks (not returned by rank scan)
+              -- and any cards placed so recently they haven't zone-registered yet.
+              local nearby = getCardsNearPos(sColor, capturedPos, 3.0)
+              for _, obj in ipairs(nearby) do
+                local qty = 1
+                pcall(function() qty = obj.getQuantity() end)
+                if qty < 7 then
+                  local guid; local ok = pcall(function() guid = obj.getGUID() end)
+                  if ok and guid and not seenGuids[guid] then
+                    seenGuids[guid] = true
+                    table.insert(safe, obj)
+                  end
+                end
               end
+              if #safe > 0 then stackOrSpread(safe, capturedPos) end
             end)
+            -- Unconditional book check: getTableCardsOfRank skips all-wild Decks (no
+            -- natural rank), so if the 7 wilds merged before the scan, safe is empty
+            -- but checkAndMoveBooks finds the Deck(qty≥7) in zone 1 directly.
+            Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+            Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 4.5)
           end, dt + 1.0)
         end)
       end, t)
@@ -7501,8 +7685,10 @@ function executeTurnPlan(plan)
           handleRedThrees(sColor, function()
             pcall(function() sortHand(nil, sColor) end)
             Wait.time(function()
-              gPlanResult = buildTurnPlan(sColor)
-              showPlanPanel(gPlanResult)
+              if sColor == "White" then
+                gPlanResult = buildTurnPlan(sColor)
+                showPlanPanel(gPlanResult)
+              end
             end, 0.75)
           end)
         else
@@ -7575,23 +7761,28 @@ function getTableCardsOfRank(sColor, rank)
     if ok and zoneObjs then
       for _, obj in ipairs(zoneObjs) do
         pcall(function()
-          if not obj.is_face_down then
-            if obj.tag == "Card" then
+          if obj.tag == "Card" then
+            -- Individual face-down cards are genuinely hidden and not part of a meld.
+            if not obj.is_face_down then
               local _, r, _ = cardDeets(obj)
               if r == rank then table.insert(result, obj) end
-            elseif obj.tag == "Deck" then
-              local ok_dc, deckCards = pcall(function() return obj.getObjects() end)
-              if ok_dc and deckCards and #deckCards > 0 then
-                -- Skip wilds (2s/Jokers) to find the natural rank — same logic as getMelds.
-                -- A black book has wilds mixed in; if a wild is first in the Deck's internal
-                -- order, using deckCards[1] directly would return "2"/"Joker" and miss the book.
-                local natRank
-                for _, dc in ipairs(deckCards) do
-                  local _, cr = cardDeets(dc)
-                  if cr ~= "2" and cr ~= "Joker" then natRank = cr; break end
-                end
-                if natRank and natRank == rank then table.insert(result, obj) end
+            end
+          elseif obj.tag == "Deck" then
+            -- Accept face-down Decks: TTS marks merged Decks as face-down when wild
+            -- cards (placed with setRotation{0,180,0}) are mixed in, even though the
+            -- cards are physically face-up.  Filtering them out causes the scan to
+            -- undercount and miss book completions.
+            local ok_dc, deckCards = pcall(function() return obj.getObjects() end)
+            if ok_dc and deckCards and #deckCards > 0 then
+              -- Skip wilds (2s/Jokers) to find the natural rank — same logic as getMelds.
+              -- A black book has wilds mixed in; if a wild is first in the Deck's internal
+              -- order, using deckCards[1] directly would return "2"/"Joker" and miss the book.
+              local natRank
+              for _, dc in ipairs(deckCards) do
+                local _, cr = cardDeets(dc)
+                if cr ~= "2" and cr ~= "Joker" then natRank = cr; break end
               end
+              if natRank and natRank == rank then table.insert(result, obj) end
             end
           end
         end)
@@ -7775,7 +7966,10 @@ function getCardsNearPos(sColor, pos, radius)
     if ok and zoneObjs then
       for _, obj in ipairs(zoneObjs) do
         pcall(function()
-          if not obj.is_face_down and (obj.tag == "Card" or obj.tag == "Deck") then
+          -- No is_face_down filter: merged Decks containing wilds are often marked
+          -- face-down by TTS even though the cards are physically face-up.  We want
+          -- to find all meld/book Decks near the position regardless of their face state.
+          if obj.tag == "Card" or obj.tag == "Deck" then
             local ok_p, opos = pcall(function() return obj.getPosition() end)
             if ok_p and opos then
               local dx = opos.x - pos.x
@@ -8296,7 +8490,7 @@ end
 --==============================================================================
 -- executeLayoutRank: animation layer — runs the Wait.time chain and spread4.
 -- `plan` must be a successful result from planLayoutRank.
-function executeLayoutRank(sColor, plan)
+function executeLayoutRank(sColor, plan, bookByStacking)
   local function dph(str)
     if gtDebugFlags["layouthand"] then printToColor("[layouthand] " .. str, sColor) end
   end
@@ -8320,121 +8514,132 @@ function executeLayoutRank(sColor, plan)
   local capturedRank    = plan.rank
   local capturedPos     = plan.targetPos
   local capturedIsBook  = plan.targetIsBook
-  local capturedCards   = plan.cards   -- the hand cards we placed; always include them
+  -- NOTE: do NOT keep a capturedCards reference for post-placement use.
+  -- TTS merges placed cards into the existing meld Deck immediately on setPosition;
+  -- the original Card object references become invalid C# objects.  Accessing them
+  -- (even inside pcall) throws "Object reference not set" at the C# layer, escaping Lua.
+  -- All post-placement scanning is done via live zone/position queries instead.
   Wait.time(function()
     if playerStuff[sColor] then playerStuff[sColor].bSpreading = false end
 
     local freshScan
     if capturedIsBook then
-      -- Extending a completed book: use rank-based scan so spread4 sees the full
+      -- Extending a completed book: rank-based zone scan so spread4 sees the full
       -- Deck (qty≥7) and can apply the 90-degree rotation / checkAndMoveBooks.
       freshScan = getMeldColumnObjects(sColor, capturedRank)
     else
-      -- Extending an open meld (or creating a new one): use position-based walk
-      -- that stops at book boundaries (qty≥7).  This prevents getMeldColumnObjects
-      -- from sweeping a same-rank completed book that happens to share the column.
-      local nearby = getCardsNearPos(sColor, capturedPos, 1.5)
-      local anchor = nil
+      -- Extending an open meld (or creating a new one).
+      --
+      -- PRIMARY: zone-based rank scan.  getMeldColumnForSweep (Physics.cast) was
+      -- the previous primary, but it has a fatal flaw: when a Physics hit returns
+      -- a stale reference to a card that TTS already merged into a Deck, getGUID()
+      -- throws at the C# layer, the catch fires `break`, and the walk stops
+      -- mid-column.  Every card beyond that point is silently lost from freshScan.
+      -- Zone scans iterate live zone.getObjects() lists — no stale references.
+      local rankScan = getMeldColumnObjects(sColor, capturedRank)
+      freshScan = {}
+      local seenGuids = {}
+      for _, obj in ipairs(rankScan) do
+        local qty = 1
+        pcall(function() qty = obj.getQuantity() end)
+        if qty < 7 then
+          local guid; pcall(function() guid = obj.getGUID() end)
+          if guid and not seenGuids[guid] then
+            seenGuids[guid] = true
+            table.insert(freshScan, obj)
+          end
+        end
+      end
+      -- SUPPLEMENT: position-based scan for cards placed so recently that TTS
+      -- hasn't yet registered them in the zone (zone membership lags 1-2 frames
+      -- after setPosition).  Wider radius covers the full meld spread.
+      local nearby = getCardsNearPos(sColor, capturedPos, 3.0)
       for _, obj in ipairs(nearby) do
         local qty = 1
         pcall(function() qty = obj.getQuantity() end)
-        if qty < 7 then anchor = obj; break end
-      end
-      if anchor then
-        freshScan = getMeldColumnForSweep(sColor, anchor)
-        -- Union with nearby: getMeldColumnForSweep walks outward from the anchor so it
-        -- never finds cards co-located WITH the anchor (e.g. a new card dropped on top
-        -- of an existing card or Deck).  Merge any nearby non-book objects that the
-        -- sweep missed.
-        local sweepGuids = {}
-        for _, obj in ipairs(freshScan) do
-          pcall(function() sweepGuids[obj.getGUID()] = true end)
-        end
-        for _, obj in ipairs(nearby) do
-          local qty = 1
-          pcall(function() qty = obj.getQuantity() end)
-          if qty < 7 then
-            local guid
-            local ok = pcall(function() guid = obj.getGUID() end)
-            if ok and guid and not sweepGuids[guid] then
-              table.insert(freshScan, obj)
-            end
+        if qty < 7 then
+          local guid; local ok = pcall(function() guid = obj.getGUID() end)
+          if ok and guid and not seenGuids[guid] then
+            seenGuids[guid] = true
+            table.insert(freshScan, obj)
           end
         end
-      else
-        -- Fallback: nothing found near the target position yet (all cards still
-        -- animating) — scan by rank but exclude completed books so we don't
-        -- accidentally grab them.
-        local rankScan = getMeldColumnObjects(sColor, capturedRank)
-        freshScan = {}
-        for _, obj in ipairs(rankScan) do
-          local qty = 1
-          pcall(function() qty = obj.getQuantity() end)
-          if qty < 7 then table.insert(freshScan, obj) end
-        end
       end
     end
 
-    -- Include any placed hand cards that the zone scan missed (zone membership can
-    -- lag a frame after setPosition).  Only add cards that appear as standalone
-    -- top-level zone objects: cards inside a Deck do NOT appear in getObjects() and
-    -- must not be added — calling setPositionSmooth on a card-inside-a-Deck throws.
-    local sweepGuids = {}
-    for _, obj in ipairs(freshScan) do
-      pcall(function() sweepGuids[obj.getGUID()] = true end)
-    end
-    local topLevelGuids = {}
-    pcall(function()
-      local czones = getPlayerZones(sColor)
-      if czones then
-        for _, sz in ipairs(czones.zones) do
+    -- ── Auto-exec book detection (bookByStacking path) ─────────────────────────
+    -- Use getMeldColumnObjects (zone getObjects(), no Physics.cast) as the
+    -- authoritative count.  It finds natural cards by rank AND wild cards by
+    -- lateral proximity — exactly the same source snapshotState uses.
+    -- The qty<7 filter excludes any completed book Decks of the same rank that
+    -- have already been moved to the side zones by a prior checkAndMoveBooks.
+    if bookByStacking and not capturedIsBook then
+      local authObjs  = {}
+      local authGuids = {}
+      local authTotal = 0
+      local rawObjs = getMeldColumnObjects(sColor, capturedRank)
+      for _, obj in ipairs(rawObjs) do
+        local q = 1
+        pcall(function() local qq = obj.getQuantity(); if qq and qq >= 1 then q = qq end end)
+        if q < 7 then
+          authTotal = authTotal + q
+          table.insert(authObjs, obj)
+          pcall(function() authGuids[obj.getGUID()] = true end)
+        end
+      end
+      dph("auth count rank=" .. capturedRank .. " objs=" .. #authObjs .. " total=" .. authTotal)
+      if authTotal >= 7 then
+        -- Merge into one Deck via putObject rather than simultaneous setPosition.
+        -- setPosition relies on TTS physics to auto-merge, which fails intermittently
+        -- when two Deck objects land at the same spot (produces two co-located decks).
+        -- putObject is an explicit API merge that is always deterministic.
+        --
+        -- Sort largest-qty object first so it becomes the stable merge base.
+        table.sort(authObjs, function(a, b)
+          local qa, qb = 1, 1
+          pcall(function() local q = a.getQuantity(); if q >= 1 then qa = q end end)
+          pcall(function() local q = b.getQuantity(); if q >= 1 then qb = q end end)
+          return qa > qb
+        end)
+        local base = authObjs[1]
+        pcall(function() base.setPosition(capturedPos) end)
+        for i = 2, #authObjs do
           pcall(function()
-            for _, obj in ipairs(sz.obj.getObjects()) do
-              pcall(function() topLevelGuids[obj.getGUID()] = true end)
-            end
+            local merged = base.putObject(authObjs[i])
+            if merged then base = merged end
           end)
         end
+        -- Primary check at 1.5 s; backup at 4.0 s in case TTS needs time to settle.
+        Wait.time(function()
+          pcall(function() checkAndMoveBooks(sColor) end)
+        end, 1.5)
+        Wait.time(function()
+          pcall(function() checkAndMoveBooks(sColor) end)
+        end, 4.0)
+        dph("stacked (putObject) " .. authTotal .. " → book (rank=" .. capturedRank .. ")")
+        broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
+        return
       end
-    end)
-    for _, card in ipairs(capturedCards) do
-      local guid
-      local ok = pcall(function() guid = card.getGUID() end)
-      if ok and guid and topLevelGuids[guid] and not sweepGuids[guid] then
-        table.insert(freshScan, card)
-      end
+      -- authTotal < 7: fall through to normal spread4 path below
     end
 
+    -- ── Existing spread4 path (manual / layout-pretty, or non-booking auto-exec) ──
     local safeCards = {}
     for _, obj in ipairs(freshScan) do
       local ok = pcall(function() obj.getPosition() end)
       if ok then table.insert(safeCards, obj) end
     end
-    -- Count total cards across all safe objects (Decks contribute their full qty).
-    local totalQty = 0
-    for _, obj in ipairs(safeCards) do
-      local q = 1
-      pcall(function() local qq = obj.getQuantity(); if qq and qq >= 1 then q = qq end end)
-      totalQty = totalQty + q
-    end
-    dph("spread4 for rank=" .. capturedRank .. " targetIsBook=" .. tostring(capturedIsBook) .. " safeCards=" .. #safeCards .. " totalQty=" .. totalQty)
+    dph("spread4 rank=" .. capturedRank .. " targetIsBook=" .. tostring(capturedIsBook) .. " safeCards=" .. #safeCards)
     if #safeCards > 0 then
-      if not capturedIsBook and totalQty >= 7 then
-        -- Book-size meld: stack all cards onto the anchor so TTS physics merges them
-        -- into a single Deck.  spread4 would leave them spread, which checkAndMoveBooks
-        -- can't detect.  Stacking lets TTS create the Deck; checkAndMoveBooks moves it.
-        for _, obj in ipairs(safeCards) do
-          pcall(function() obj.setPosition(capturedPos) end)
-        end
-        Wait.time(function()
-          pcall(function() checkAndMoveBooks(sColor) end)
-        end, 1.5)
-        dph("stacked " .. totalQty .. " cards for book (rank=" .. capturedRank .. ")")
-      else
-        local ok, err = pcall(function() spread4(sColor, capturedPos, safeCards) end)
-        if not ok then dph("spread4 error for rank=" .. capturedRank .. ": " .. tostring(err)) end
-      end
+      local ok, err = pcall(function() spread4(sColor, capturedPos, safeCards) end)
+      if not ok then dph("spread4 error for rank=" .. capturedRank .. ": " .. tostring(err)) end
     end
     broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
+    -- Belt-and-suspenders book check: if the zone scan undercounted (e.g. one card
+    -- merged just before the scan ran) the stacking above may have missed a card.
+    -- These backup calls find any Deck(qty≥7) TTS assembled on its own.
+    Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+    Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 4.5)
   end, t + 0.5)
 end
 
@@ -8446,9 +8651,15 @@ end
 -- has already verified the opening meld minimum across all planned melds.
 -- planGoingOut: pass true when the turn plan decided go-out; bypasses mid-execution
 -- re-validation in planLayoutRank (see its comment for why).
-function layoutHandRank(sColor, rank, skipRedThrees, skipOpeningCheck, planGoingOut)
+-- bookByStacking: when true (auto-exec path) uses an authoritative zone-object count
+-- to detect book completion instead of the Physics.cast sweep, then stacks the cards
+-- so TTS merges them into a Deck for checkAndMoveBooks to handle.  Pass false (or nil)
+-- for manual / layout-pretty paths so the existing spread4 behaviour is preserved.
+function layoutHandRank(sColor, rank, skipRedThrees, skipOpeningCheck, planGoingOut, bookByStacking)
   if not skipRedThrees then
-    handleRedThrees(sColor, function() layoutHandRank(sColor, rank, true, skipOpeningCheck, planGoingOut) end)
+    handleRedThrees(sColor, function()
+      layoutHandRank(sColor, rank, true, skipOpeningCheck, planGoingOut, bookByStacking)
+    end)
     return
   end
   local plan = planLayoutRank(sColor, rank, planGoingOut)
@@ -8474,7 +8685,7 @@ function layoutHandRank(sColor, rank, skipRedThrees, skipOpeningCheck, planGoing
       end
     end
   end
-  executeLayoutRank(sColor, plan)
+  executeLayoutRank(sColor, plan, bookByStacking)
 end
 
 --==============================================================================
@@ -8652,7 +8863,11 @@ function planMoveBooks(sColor)
   if not ok1 or not z1objs then return {ok=false} end
   for _, obj in ipairs(z1objs) do
     pcall(function()
-      if not obj.is_face_down and obj.tag == "Deck" then
+      -- Accept face-up OR face-down Decks: when wilds (placed with setRotation{0,180,0})
+      -- are included in the stack, TTS may mark the merged Deck as face-down even though
+      -- the cards are physically face-up.  Any Deck of qty≥7 in zone 1 is a complete
+      -- book — the draw/discard piles never appear here.
+      if obj.tag == "Deck" then
         local ok_q, qty = pcall(function() return obj.getQuantity() end)
         if ok_q and qty and qty >= 7 then
           local targetLat, slotZoneIdx
@@ -8676,18 +8891,27 @@ function planMoveBooks(sColor)
   end
 
   if #moves == 0 then return {ok=false} end
-  return {ok=true, moves=moves}
+  -- Book rotation: 90° from the card's face-up orientation so books lie landscape.
+  -- spread4 uses rot.y = 90*floor((rotY+45)/90) then rot90.y = rot.y+90 — same formula.
+  local rotY = 0
+  pcall(function() rotY = getPlayerRotY(sColor) end)
+  local baseRotY = 90 * math.floor((rotY + 45) / 90)
+  return {ok=true, moves=moves, bookRotY=(baseRotY + 90) % 360}
 end
 
 --==============================================================================
 -- executeMoveBooks: animation layer for checkAndMoveBooks.
 function executeMoveBooks(plan)
+  local bookRotY = plan.bookRotY or 90   -- 90° from face-up = landscape orientation
   local delay = 0
   for _, move in ipairs(plan.moves) do
     local captured = move.book
     local tPos     = move.tPos
     Wait.time(function()
-      pcall(function() captured.setPositionSmooth(tPos, false, false) end)
+      pcall(function()
+        captured.setRotation({0, bookRotY, 0})
+        captured.setPositionSmooth(tPos, false, false)
+      end)
     end, delay)
     delay = delay + 0.4
   end
@@ -9035,9 +9259,14 @@ function playerZoneCheck(sColor, oTheObject)
 end
 
 function onObjectLeaveScriptingZone(zone, leave_object)
-  if (leave_object.tag=="Deck") then
-    for _, oneCard in ipairs(leave_object.getObjects()) do
-      onObjectLeaveScriptingZone(zone, oneCard)
+  local ok, tag = pcall(function() return leave_object.tag end)
+  if not ok then return end
+  if (tag=="Deck") then
+    local ok2, objs = pcall(function() return leave_object.getObjects() end)
+    if ok2 and objs then
+      for _, oneCard in ipairs(objs) do
+        onObjectLeaveScriptingZone(zone, oneCard)
+      end
     end
     return
   end
@@ -9134,11 +9363,9 @@ function playerZoneBoundary (player_color, obj)
       local name = coolName(player_color)
       if tablepop(fromdeck,obj.guid) then
         if (not playerStuff[player_color].bMaskActions) then
---          announceAll("dc="..playerStuff[player_color].drawcount)
           if (playerStuff[player_color].drawcountqueued==false) then
             playerStuff[player_color].drawcountqueued=true
             Wait.time(function()
-                --announceAll(name .. " drew " .. playerStuff[player_color].drawcount);
                 setReminder("White")
                 setReminder("Green")
                 setReminder("Blue")
@@ -9148,29 +9375,34 @@ function playerZoneBoundary (player_color, obj)
           end
           announceAll(name .. " drew 1");
           addToDrawCount(player_color,1,false)
-
---          playerStuff[player_color].drawcount = playerStuff[player_color].drawcount+1;
---          announceAll(name .. " drew 1")
         end
       else
         if tablepop(fromdiscard,obj.guid) then
           if (not playerStuff[player_color].bMaskActions) then
+            -- Hard limit: max 7 cards from the discard pile per turn.
+            if playerStuff[player_color].drawcountdisc >= 7 then
+              printToColor("Draw blocked — max 7 cards from the discard pile per turn.", player_color)
+              pcall(function()
+                if obj_Zone_Discard then
+                  local dpos = obj_Zone_Discard.getPosition()
+                  obj.setPosition({dpos.x, dpos.y + 1, dpos.z})
+                  obj.setRotation({0, 180, 0})
+                end
+              end)
+              return
+            end
             if (playerStuff[player_color].drawcountqueued==false) then
               playerStuff[player_color].drawcountqueued=true
               Wait.time(function()
-                  --announceAll(name .. " drew " .. playerStuff[player_color].drawcountdisc .. " (from discard)");
                   setReminder("White")
                   setReminder("Green")
                   setReminder("Blue")
                   setReminder("Red")
                   playerStuff[player_color].drawcountqueued=false;
---                  playerStuff[player_color].drawcountdisc=0;
                 end, 1)
             end
             announceAll(name .. " drew 1 (from discard)");
             addToDrawCount(player_color,1,true)
---            playerStuff[player_color].drawcountdisc = playerStuff[player_color].drawcountdisc+1;
---            announceAll(name .. " drew 1 (from discard)")
           end
         end
       end
@@ -9265,6 +9497,73 @@ end
 --       debug("Decks ----------------")
 --       --tableDump(tablePlayerDecks)
 -- end
+
+-- Fired by TTS when a player hovers over an object and presses a number key.
+-- Returning true blocks TTS's default deal so we can enforce per-pile limits.
+-- Behaviour by pile type:
+--   Main deck    → max 2 at a time.  If number > 2: warn and draw NOTHING.
+--   Discard pile → max 7 per turn.   If number > 7: warn and draw NOTHING.
+--   Foot pile    → max 13. If number > 13: draw exactly 13 (cap, no block).
+function onObjectNumberTyped(object, color, number)
+  if not object then return false end
+
+  local pileType = nil  -- "deck", "discard", or "foot"
+  local limit    = nil
+
+  -- 1. Main deck
+  pcall(function()
+    if mainDeck and object.getGUID() == mainDeck.getGUID() then
+      pileType = "deck"; limit = 2
+    end
+  end)
+
+  -- 2. Discard pile — any Card/Deck currently inside the discard zone
+  if not pileType then
+    pcall(function()
+      if obj_Zone_Discard then
+        for _, obj in ipairs(obj_Zone_Discard.getObjects()) do
+          if obj.getGUID() == object.getGUID() then
+            pileType = "discard"; limit = 7; break
+          end
+        end
+      end
+    end)
+  end
+
+  -- 3. Foot pile — face-down Deck/Card in any player's score zone
+  if not pileType then
+    pcall(function()
+      if object.is_face_down and (object.tag == "Deck" or object.tag == "Card") then
+        for _, scoreColor in ipairs({"White", "Green", "Blue", "Red"}) do
+          if objectInScoreZone(object, scoreColor) then
+            pileType = "foot"; limit = 13; break
+          end
+        end
+      end
+    end)
+  end
+
+  if not limit or number <= limit then
+    return false  -- within limit — let TTS deal normally
+  end
+
+  -- Over the limit.
+  if pileType == "foot" then
+    -- Foot: cap at 13 and deal that many.
+    local qty = 1
+    pcall(function() qty = object.getQuantity() end)
+    local toDeal = math.min(limit, qty)
+    if toDeal > 0 then pcall(function() object.deal(toDeal, color) end) end
+    printToColor(string.format("Foot draw capped at %d.", limit), color)
+  else
+    -- Deck / Discard: warn and draw NOTHING.
+    printToColor(string.format(
+      "Draw blocked — max %d card%s from the %s.",
+      limit, limit == 1 and "" or "s",
+      pileType == "deck" and "main deck" or "discard pile"), color)
+  end
+  return true  -- block TTS's default deal in all cases
+end
 
 function onObjectPickUp(colorName, object)
     debug(colorName .. " picked up " .. object.getGUID())
