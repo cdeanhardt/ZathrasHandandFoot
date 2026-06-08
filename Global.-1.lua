@@ -162,6 +162,7 @@ function recordScores()
     end
     refreshScoresheet()
     debug(dump(gtScores),"panel")
+    saveGame()
 
 end
 
@@ -1080,7 +1081,7 @@ function showPlanPanel(plan)
         elseif noMelds or hasFoot then
           startAutoExecTimer(2, 4)
         else
-          startAutoExecTimer(5, 8)
+          startAutoExecTimer(2, 5)
         end
       end
     end, 0.05)
@@ -3589,8 +3590,8 @@ function spread4(player, desiredPos, tCards)
               spinnableCards[sOrder].setRotation(rot90)
             end
           end
-          Wait.time( function() pcall(setCardDecal) end, 1.0)
           -- Book complete: after cards have settled into a Deck, move it to zone 2/3.
+          -- setCardDecal is called inside executeMoveBooks after the book has arrived.
           Wait.time( function() pcall(function() checkAndMoveBooks(player) end) end, 2.5)
 
       -- if we're neither near-bookable 6 cards or stackable 7+ cards, Then
@@ -6485,23 +6486,40 @@ function buildTurnPlan(sColor)
   local hadMeldPlans = (#melds > 0)
 
   -- Cap red-book completions when we still need black books.
-  -- Rule: after any red-book plays this turn, at least (2 - blackBooks) open melds
-  -- must remain on the table for later black-book conversion.
-  --   blackNeeded = 2 - state.bookCounts.black  (1 or 2)
-  --   redCap      = max(0, openMeldCount - blackNeeded)
-  -- Example: 3 open melds, 1 black book → blackNeeded=1, redCap=2 (keep 1 for black).
-  -- Example: 2 open melds, 0 black books → blackNeeded=2, redCap=0 (keep both for black).
-  -- Lifted entirely when black books >= 2 (go-out requirement already met).
-  -- For demoted plays: fill naturals up to 6 (leaving room for 1 wild to complete black).
-  --   If already at 6+, skip entirely — Phase 2 adds the wild directly.
+  --
+  -- Only near-black melds (exactly 6 cards) can become black books with a single wild,
+  -- so they are the only valid reserves.  The cap has two parts:
+  --
+  --   baseReds  = max(0, 2 - redBooks)   — reds still needed to reach the 2-book minimum
+  --   extraReds = max(0, nearBlack - blackNeeded)
+  --               — extras allowed only when near-black melds exceed the requirement
+  --                 (each extra red consumes one near-black meld, so the remainder
+  --                 must still cover all outstanding black books)
+  --   redCap = baseReds + extraReds
+  --
+  -- Example: 1 red, 0 black, 2 near-black melds
+  --   baseReds=1  extraReds=max(0,2-2)=0  → redCap=1  (make 1 red; keep both 6-card
+  --   melds — but one is consumed by baseReds, leaving 1 for black; see note below)
+  --
+  -- Example: 2 red, 1 black, 3 near-black melds
+  --   baseReds=0  extraReds=max(0,3-1)=2  → redCap=2  (2 extra reds; 1 near-black left)
+  --
+  -- Lifted entirely when black books >= 2.
+  -- For demoted plays: fill naturals up to 6 then stop; Phase 2 adds the wild directly.
   if not state.hasFoot and state.bookCounts.black < 2 then
     local blackNeeded = 2 - state.bookCounts.black
 
-    -- Count open (non-book) meld groups currently on the table.
-    local openMeldCount = 0
-    for _ in pairs(state.meldsByRank) do openMeldCount = openMeldCount + 1 end
+    -- Count near-black melds: exactly 6 cards total (naturals + embedded wilds).
+    local nearBlackCount = 0
+    for _, meld in pairs(state.meldsByRank) do
+      if (meld.count or 0) + (meld.embeddedWilds or 0) == 6 then
+        nearBlackCount = nearBlackCount + 1
+      end
+    end
 
-    local redCap = math.max(0, openMeldCount - blackNeeded)
+    local baseReds  = math.max(0, 2 - state.bookCounts.red)
+    local extraReds = math.max(0, nearBlackCount - blackNeeded)
+    local redCap    = baseReds + extraReds
 
     local p1Seen = 0
     local cappedMelds = {}
@@ -8589,12 +8607,10 @@ function executeLayoutRank(sColor, plan, bookByStacking)
       end
       dph("auth count rank=" .. capturedRank .. " objs=" .. #authObjs .. " total=" .. authTotal)
       if authTotal >= 7 then
-        -- Merge into one Deck via putObject rather than simultaneous setPosition.
-        -- setPosition relies on TTS physics to auto-merge, which fails intermittently
-        -- when two Deck objects land at the same spot (produces two co-located decks).
-        -- putObject is an explicit API merge that is always deterministic.
-        --
+        -- Pass 1: move everything to the anchor and merge via putObject.
         -- Sort largest-qty object first so it becomes the stable merge base.
+        -- putObject is deterministic; simultaneous setPosition is not (can leave
+        -- two co-located Deck objects that TTS physics fails to merge).
         table.sort(authObjs, function(a, b)
           local qa, qb = 1, 1
           pcall(function() local q = a.getQuantity(); if q >= 1 then qa = q end end)
@@ -8609,14 +8625,64 @@ function executeLayoutRank(sColor, plan, bookByStacking)
             if merged then base = merged end
           end)
         end
-        -- Primary check at 1.5 s; backup at 4.0 s in case TTS needs time to settle.
+
+        -- Pass 2 (cleanup sweep): after TTS processes the putObject calls, sweep
+        -- the column for any stray objects that were missed (failed merges, drifted
+        -- cards).  Two sub-passes:
+        --   a) Zone-based re-scan — catches co-located strays at capturedPos.
+        --   b) Physics.cast sweep (getMeldColumnForSweep) — catches strays that
+        --      drifted to adjacent positions in the vertical column.
         Wait.time(function()
+          -- Sub-pass a: zone-based re-scan.
+          local colObjs = {}
+          pcall(function() colObjs = getMeldColumnObjects(sColor, capturedRank) end)
+          if #colObjs >= 1 then
+            if #colObjs > 1 then
+              table.sort(colObjs, function(a, b)
+                local qa, qb = 1, 1
+                pcall(function() local q = a.getQuantity(); if q >= 1 then qa = q end end)
+                pcall(function() local q = b.getQuantity(); if q >= 1 then qb = q end end)
+                return qa > qb
+              end)
+              local zBase = colObjs[1]
+              for i = 2, #colObjs do
+                pcall(function()
+                  local m = zBase.putObject(colObjs[i])
+                  if m then zBase = m end
+                end)
+              end
+              base = zBase
+            else
+              base = colObjs[1]   -- refresh reference in case TTS swapped the object
+            end
+          end
+          -- Sub-pass b: Physics.cast sweep from the merged object.
+          local physObjs = {}
+          pcall(function() physObjs = getMeldColumnForSweep(sColor, base) end)
+          if #physObjs > 1 then
+            local pBase = base
+            local bestQty = 1
+            for _, obj in ipairs(physObjs) do
+              local q = 1
+              pcall(function() local qq = obj.getQuantity(); if qq >= 1 then q = qq end end)
+              if q > bestQty then bestQty = q; pBase = obj end
+            end
+            for _, obj in ipairs(physObjs) do
+              if obj ~= pBase then
+                pcall(function()
+                  local m = pBase.putObject(obj)
+                  if m then pBase = m end
+                end)
+              end
+            end
+          end
           pcall(function() checkAndMoveBooks(sColor) end)
-        end, 1.5)
+        end, 0.8)
+        -- Backup check in case TTS still needs more time to settle.
         Wait.time(function()
           pcall(function() checkAndMoveBooks(sColor) end)
         end, 4.0)
-        dph("stacked (putObject) " .. authTotal .. " → book (rank=" .. capturedRank .. ")")
+        dph("stacked (putObject+sweep) " .. authTotal .. " → book (rank=" .. capturedRank .. ")")
         broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
         return
       end
@@ -8905,16 +8971,37 @@ function executeMoveBooks(plan)
   local bookRotY = plan.bookRotY or 90   -- 90° from face-up = landscape orientation
   local delay = 0
   for _, move in ipairs(plan.moves) do
-    local captured = move.book
-    local tPos     = move.tPos
+    local captured    = move.book
+    local tPos        = move.tPos
+    local capturedRot = bookRotY
+    -- Move first (no rotation) so the deck is at rest before being rotated.
+    -- Rotating instantly while stacked at the meld position shocks the physics
+    -- engine and knocks the top card off.  Rotating after arrival is gentler.
     Wait.time(function()
-      pcall(function()
-        captured.setRotation({0, bookRotY, 0})
-        captured.setPositionSmooth(tPos, false, false)
-      end)
+      pcall(function() captured.setPositionSmooth(tPos, false, false) end)
     end, delay)
-    delay = delay + 0.4
+    Wait.time(function()
+      pcall(function() captured.setRotationSmooth({0, capturedRot, 0}, false, false) end)
+    end, delay + 1.2)
+    delay = delay + 1.6
   end
+  -- After all books have arrived and rotated, refresh icons and score display.
+  -- delay now points just past the last move slot; subtract 0.4 to get when the
+  -- last rotation fires (delay-1.6+1.2), then add 0.8 for physics to settle.
+  -- Net: delay + 0.4.  setCardDecal calls countScoreInternal internally so it
+  -- also corrects the book-count used for scoring.
+  local finalDelay = delay + 0.4
+  Wait.time(function()
+    pcall(setCardDecal)
+    pcall(function()
+      if bRunScoring then
+        local scores = countScoreInternal()
+        for sColor, iScore in pairs(scores) do
+          pcall(function() obj_scoretext[sColor].TextTool.setValue("" .. iScore) end)
+        end
+      end
+    end)
+  end, finalDelay)
 end
 
 --==============================================================================
@@ -10049,7 +10136,7 @@ function checkFootNote(sColor, iCheckCount)
           gbHandWonPause = true
           gbFinishFlag   = true
           gbHandOver     = true
-          recordScores()
+          Wait.time(function() recordScores() end, 9.0)
           Wait.time(function() gbFinishFlag=false; setCardDecal(); end, 10.0)
           Wait.time(function() gbHandWonPause=false end, 5.0)
           finishFlag()
