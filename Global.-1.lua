@@ -15,8 +15,10 @@ gi_BLACK_BOOK_SCORE = 300
 gi_WILD_BOOK_SCORE = 1500
 gi_OPENING_MELD_MIN = {50, 90, 120, 150}  -- point minimum for first meld, by hand number
 GT_SWEEP_SETTLE_DELAY = 2.0               -- seconds after last play before post-execution meld sweep
-gbHandWonPause = false
-gbHandOver     = false  -- true from when someone goes out until next hand is dealt
+gbHandWonPause  = false
+gbHandOver      = false  -- true from when someone goes out until next hand is dealt
+gsSavedDate     = ""    -- date string at last save; used to detect a new day on reload
+gCompletedGames = {}    -- snapshots of games completed today; persisted via onSave/onLoad
 gLEFT  = 0
 gRIGHT = 1
 gUP    = 2
@@ -139,8 +141,11 @@ end
 
 
 -- =============================================================================
-function recordScores()
+function recordScores(iHand)
   -- execute a tally of scores and update the current hand on the scoresheet
+  -- iHand must be captured at the time the hand ends (passed from checkFootNote)
+  -- to avoid a race where the user deals before this fires and giHand is already incremented.
+  iHand = (type(iHand) == "number") and iHand or giHand
   debug("recording scores","panel")
   debug(dump(gtScores),"panel")
 
@@ -154,15 +159,16 @@ function recordScores()
       debug("scolor=".. sColor,"panel")
       debug("playernum="..i,"panel")
       debug("score="..iScore,"panel")
-      debug("giHand="..giHand,"panel")
-      UI.setAttribute("P".. playerStuff[sColor].num .. "R" .. giHand .. "Score","text",iScore)
-      gtScores[i][giHand]=iScore
-      debug("S[1][1]=" ..gtScores[i][giHand],"panel")
+      debug("iHand="..iHand,"panel")
+      UI.setAttribute("P".. playerStuff[sColor].num .. "R" .. iHand .. "Score","text",iScore)
+      gtScores[i][iHand]=iScore
+      debug("S["..i.."]["..iHand.."]=" ..gtScores[i][iHand],"panel")
       debug(dump(gtScores),"panel")
     end
     refreshScoresheet()
     debug(dump(gtScores),"panel")
-    saveGame()
+    gbHandOver = false   -- scoring complete; allow dealing now
+    pcall(updateDailyLog)
 
 end
 
@@ -1223,6 +1229,10 @@ function click_NewGameSure(_, color)
   -- user clicked the newgame button while it was still within the countdown
   -- (otherwise, it would have been changed back to the orig button)
   -- so let's deal!
+  if gbHandOver then
+    printToAll("Scores are still being calculated — please wait a moment before dealing.", "Yellow")
+    return
+  end
   local playerList = getSortedSeatedPlayers()
   if (#playerList==1) then
     broadcastToAll("Playing alone? How sad for you.","Yellow")
@@ -1272,14 +1282,14 @@ end
 
 -- =============================================================================
 function setHand(iNewHand)
-  -- a new hand is being requested.  The number might have been indexed beyond
-  -- 4, if so, it means a new game and we'll clear the scores.
-  giHand=iNewHand
-  copyScores()
-  if (giHand>4) then
-    giHand=1
+  giHand = iNewHand
+  if giHand > 4 then
+    -- Seal the completed game into today's log before wiping scores.
+    if not gCompletedGames then gCompletedGames = {} end
+    table.insert(gCompletedGames, snapshotCurrentGame(4))
+    pcall(updateDailyLog)
+    giHand = 1
     printToAll("Starting a new game!")
-    printToAll("previous scores were recorded to a notebook tab")
     ClearScores()
   end
 end
@@ -1584,10 +1594,9 @@ end
 
 -- =============================================================================
 function initializeHand()
-  -- fire up a new hand... save the old scores, restack cards, and shuffle
+  -- fire up a new hand... restack cards, and shuffle
   gbHandOver     = false
   gbInitializing = true
-  copyScores()
   local maindeck = stackCards()
   initializeVariables()
   debug("Initialized...")
@@ -1654,10 +1663,12 @@ end
 function onSave()
   debug("saved-----------", "loaded")
   local t = {
-    f2gfc       = gsFirstToGoFirstColor,
-    scores      = gtScores,
-    hand        = giHand,
-    ruleSet     = giRuleSet,
+    f2gfc          = gsFirstToGoFirstColor,
+    scores         = gtScores,
+    hand           = giHand,
+    ruleSet        = giRuleSet,
+    savedDate      = gsSavedDate,
+    completedGames = gCompletedGames,
   }
   -- Save per-player preferences so they survive a script reload mid-game.
   if playerStuff then
@@ -1697,8 +1708,10 @@ function onLoad(saved_data)
     if loaded_data.hand and loaded_data.hand > 0 then
       giHand = loaded_data.hand
     end
-    loadedRuleSet    = loaded_data.ruleSet
-    loadedPlayerPrefs = loaded_data.playerPrefs
+    loadedRuleSet       = loaded_data.ruleSet
+    loadedPlayerPrefs   = loaded_data.playerPrefs
+    gsSavedDate         = loaded_data.savedDate or ""
+    gCompletedGames     = loaded_data.completedGames or {}
   end
 
   for _, oThing in pairs(self.getObjects()) do
@@ -2376,6 +2389,7 @@ end, true)
     if giHand and giHand > 0 then
       refreshScoresheet()
     end
+    pcall(checkDateOnLoad)
   end, 1)
 
   -- autodeal
@@ -10136,7 +10150,8 @@ function checkFootNote(sColor, iCheckCount)
           gbHandWonPause = true
           gbFinishFlag   = true
           gbHandOver     = true
-          Wait.time(function() recordScores() end, 9.0)
+          local iHandAtEnd = giHand   -- capture now; giHand may change if user deals before 9s
+          Wait.time(function() recordScores(iHandAtEnd) end, 3.0)
           Wait.time(function() gbFinishFlag=false; setCardDecal(); end, 10.0)
           Wait.time(function() gbHandWonPause=false end, 5.0)
           finishFlag()
@@ -10541,6 +10556,7 @@ function onChat(message, sender)
     Player[sColor].print ("#score hand <hand>")
     Player[sColor].print ("#score f2gf <color>")
     Player[sColor].print ("#score copy")
+    Player[sColor].print ("#date <string> : archive today's log and start fresh for a new session")
     Player[sColor].print ("#footnote [true|false] [, <color>] : turn footnote warnings on/off for self or target color")
     Player[sColor].print ("#align [true|false] [, <color>] : evenly space card stacks")
     Player[sColor].print ("#playhand : auto-play matching cards from hand to table")
@@ -10851,11 +10867,12 @@ end
     end
 
     if (string.match(sMsg,"copy")) then
-      copyScores()
-      printToColor("Scores recorded to Notebook tab", sColor)
+      pcall(updateDailyLog)
+      printToColor("Daily log updated in Notebook tab", sColor)
       return false
     end
     refreshScoresheet()
+    pcall(updateDailyLog)
     return false
   end
 
@@ -10893,6 +10910,27 @@ end
       displaySort(sender.color, sender.color, playerStuff[sender.color].sSortMetaOrder)
       return false
     end
+    if string.sub(message, 1, 5) == "#date" then
+      local arg = string.match(message, "^#date%s+(.*)")
+      local newDate = arg and string.gsub(arg, "^%s*(.-)%s*$", "%1") or ""
+      if newDate ~= "" then
+        if newDate ~= gsSavedDate then
+          pcall(archiveToPreviousGames)
+          gCompletedGames = {}
+          local idx = findOrCreateNotebookTab("Scores", "Grey")
+          Notes.editNotebookTab({ index=idx, title="Scores", body="", color="Grey" })
+          gsSavedDate = newDate
+          pcall(updateDailyLog)
+          printToColor("Daily log archived. Starting fresh for: " .. newDate, sColor)
+        else
+          printToColor("Date string unchanged — no action taken.", sColor)
+        end
+      else
+        printToColor("Usage: #date <string>  (any unique string marks a new session)", sColor)
+      end
+      return false
+    end
+
     if string.sub(message,1,5)=="#sort" then
       if (string.match(sMsg,"help")) then
         Player[sColor].print ("w - WildCards")
@@ -11255,6 +11293,208 @@ function sortLogic(card1, card2)
 	end
 end
 
+
+-- =============================================================================
+-- Daily Log (Scores notebook tab)
+-- =============================================================================
+local _DL_SCORES_TAB    = "Scores"
+local _DL_ARCHIVE_TAB   = "Previous Games"
+local _DL_TAB_COLOR     = "Grey"
+local _DL_SEPARATOR     = "\n========================================\n"
+local _DL_MAX_DAYS      = 7
+
+function getTodayDate()
+  local ok, result = pcall(function() return os.date("%Y-%m-%d") end)
+  if ok and result and result ~= "" then return result end
+  return gsSavedDate or "unknown"
+end
+
+function getOrderedPlayerNames()
+  local byNum = {}
+  for _, color in ipairs({"White","Green","Blue","Red"}) do
+    if Player[color] and Player[color].seated and playerStuff and playerStuff[color] then
+      byNum[playerStuff[color].num] = coolName(color)
+    end
+  end
+  local names = {}
+  for i = 1, 4 do names[i] = byNum[i] or ("P"..i) end
+  return names
+end
+
+function findOrCreateNotebookTab(title, color)
+  local tabs = Notes.getNotebookTabs()
+  for i, tab in ipairs(tabs) do
+    if tab.title == title then return i - 1 end
+  end
+  Notes.addNotebookTab({ title=title, body="", color=color or "Grey" })
+  tabs = Notes.getNotebookTabs()
+  for i, tab in ipairs(tabs) do
+    if tab.title == title then return i - 1 end
+  end
+  return 0
+end
+
+function snapshotCurrentGame(handsComplete)
+  local scoresCopy = {}
+  for i = 1, 4 do
+    scoresCopy[i] = {}
+    for h = 1, 4 do
+      scoresCopy[i][h] = (gtScores and gtScores[i] and gtScores[i][h]) or 0
+    end
+  end
+  return {
+    scores        = scoresCopy,
+    playerNames   = getOrderedPlayerNames(),
+    firstColor    = gsFirstToGoFirstColor or "",
+    handsComplete = handsComplete or math.max(0, (giHand or 1) - 1),
+  }
+end
+
+function formatScoreGrid(snap)
+  local names  = snap.playerNames or {}
+  local scores = snap.scores or {}
+  local done   = snap.handsComplete or 0
+  local NW = 14  -- name column width
+  local HW = 8   -- hand column width (2-space gap + "Hand 1" = 8; 4-digit scores = 4 leading spaces)
+  local TW = 8   -- total column width (3-space gap + 5-digit max total)
+
+  local hdr = string.format("%-"..NW.."s", "")
+  for h = 1, 4 do hdr = hdr .. string.format("%"..HW.."s", "Hand "..h) end
+  hdr = hdr .. string.format("%"..TW.."s", "Total")
+  local sep = string.rep("-", NW + HW * 4 + TW)
+
+  local rows = {}
+  for i = 1, 4 do
+    local nm = names[i] or ("P"..i)
+    -- Skip placeholder names (P1/P2/P3/P4 = empty player slots)
+    if nm ~= ("P"..i) then
+      if #nm > NW-1 then nm = string.sub(nm,1,NW-1) end
+      local row = string.format("%-"..NW.."s", nm)
+      local tot = 0
+      for h = 1, 4 do
+        if h <= done then
+          local v = (scores[i] and scores[i][h]) or 0
+          tot = tot + v
+          row = row .. string.format("%"..HW.."d", v)
+        else
+          row = row .. string.format("%"..HW.."s", "----")
+        end
+      end
+      row = row .. string.format("%"..TW.."s", done > 0 and tostring(tot) or "----")
+      table.insert(rows, row)
+    end
+  end
+  return hdr.."\n"..sep.."\n"..table.concat(rows,"\n")
+end
+
+function buildScoreCommand(snap)
+  local scores = snap.scores or {}
+  local cmd = "#score set"
+  for h = 1, 4 do
+    cmd = cmd .. " " .. h
+    for i = 1, 4 do cmd = cmd .. " " .. ((scores[i] and scores[i][h]) or 0) end
+  end
+  return cmd .. " hand " .. (snap.handsComplete or 0) .. " first " .. (snap.firstColor or "")
+end
+
+function buildDailyLogContent()
+  local today = getTodayDate()
+  local out   = {}
+  local function L(s) table.insert(out, s) end
+
+  L("=== Hand and Foot  —  " .. today .. " ===")
+  L("")
+
+  local gameNum = 1
+  for _, snap in ipairs(gCompletedGames or {}) do
+    L("--- Game " .. gameNum .. " (Complete) ---")
+    L(formatScoreGrid(snap))
+    L("")
+    L(buildScoreCommand(snap))
+    L("")
+    gameNum = gameNum + 1
+  end
+
+  -- Current in-progress game: show when at least one hand has been scored.
+  -- Scan gtScores directly so this is accurate whether called from recordScores()
+  -- (giHand = the hand just scored) or any other context.
+  local done = 0
+  if gtScores then
+    for h = 1, 4 do
+      for i = 1, 4 do
+        local v = gtScores[i] and gtScores[i][h]
+        if v and v ~= 0 then done = h; break end
+      end
+    end
+  end
+  if done >= 1 then
+    local snap = snapshotCurrentGame(done)
+    local label = done == 4 and "Complete" or ("Hand " .. done .. " of 4 complete")
+    L("--- Game " .. gameNum .. " (" .. label .. ") ---")
+    L(formatScoreGrid(snap))
+    L("")
+    L(buildScoreCommand(snap))
+    L("")
+  end
+
+  return table.concat(out, "\n")
+end
+
+function updateDailyLog()
+  local idx = findOrCreateNotebookTab(_DL_SCORES_TAB, _DL_TAB_COLOR)
+  local content = buildDailyLogContent()
+  Notes.editNotebookTab({ index=idx, title=_DL_SCORES_TAB, body=content, color=_DL_TAB_COLOR })
+end
+
+function archiveToPreviousGames()
+  -- Read current Scores tab content.
+  local todayBody = ""
+  for _, tab in ipairs(Notes.getNotebookTabs()) do
+    if tab.title == _DL_SCORES_TAB then todayBody = tab.body or ""; break end
+  end
+  if todayBody == "" then return end
+
+  -- Find/create archive tab and read its current content.
+  local archIdx = findOrCreateNotebookTab(_DL_ARCHIVE_TAB, _DL_TAB_COLOR)
+  local archBody = ""
+  for _, tab in ipairs(Notes.getNotebookTabs()) do
+    if tab.title == _DL_ARCHIVE_TAB then archBody = tab.body or ""; break end
+  end
+
+  -- Prepend today's session.
+  local combined = archBody == "" and todayBody or (todayBody .. _DL_SEPARATOR .. archBody)
+
+  -- Trim to _DL_MAX_DAYS sessions.
+  local sessions = {}
+  local rem = combined
+  while rem ~= "" do
+    local s = string.find(rem, _DL_SEPARATOR, 1, true)
+    if s then
+      table.insert(sessions, string.sub(rem, 1, s-1))
+      rem = string.sub(rem, s + #_DL_SEPARATOR)
+    else
+      table.insert(sessions, rem); rem = ""
+    end
+  end
+  while #sessions > _DL_MAX_DAYS do table.remove(sessions) end
+
+  Notes.editNotebookTab({
+    index=archIdx, title=_DL_ARCHIVE_TAB,
+    body=table.concat(sessions, _DL_SEPARATOR), color=_DL_TAB_COLOR
+  })
+end
+
+function checkDateOnLoad()
+  local today = getTodayDate()
+  if gsSavedDate and gsSavedDate ~= "" and gsSavedDate ~= today then
+    pcall(archiveToPreviousGames)
+    gCompletedGames = {}
+    local idx = findOrCreateNotebookTab(_DL_SCORES_TAB, _DL_TAB_COLOR)
+    Notes.editNotebookTab({ index=idx, title=_DL_SCORES_TAB, body="", color=_DL_TAB_COLOR })
+  end
+  gsSavedDate = today
+  pcall(updateDailyLog)
+end
 
 -- Function to determine whether a specified value/object exists in a table.
 function tableContains(tableSpecified, element)
