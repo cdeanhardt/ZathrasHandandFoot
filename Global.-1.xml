@@ -227,6 +227,11 @@
                 color="#882222" textColor="#FFFFFF" fontSize="14"
                 active="false"
                 onClick="click_ActionDiscard" />
+        <!-- Build stamp. Bumped by Claude on each requested change. -->
+        <Text id="ActionVersionStamp" text="v10"
+              width="180" height="16"
+              rectAlignment="LowerCenter" offsetXY="0 3"
+              fontSize="12" color="#444444" alignment="MiddleCenter" />
     </Panel>
 </Panel>
 
@@ -236,7 +241,7 @@
 <!-- ============================================================ -->
 <Panel id="PlanResultPanel" active="false"
        width="420" height="30"
-       rectAlignment="MiddleCenter" offsetXY="280 -160"
+       rectAlignment="MiddleCenter"
        returnToOriginalPositionWhenReleased="false" allowDragging="true"
        color="#bbbbbb00"
        visibility="White">
