@@ -377,6 +377,17 @@ local function startAutoExecTimer(minSec, maxSec)
   UI.setAttribute("progressBarFill", "width", tostring(AUTOEXEC_BAR_WIDTH))
 
   local function tick()
+    -- Abort auto-exec the instant the hand ends.  When a player goes out, the go-out
+    -- handler sets gbHandWonPause/gbFinishFlag/gbHandOver.  Checking EVERY tick (not just
+    -- at expiry) cancels the countdown before any of those flags reset (gbHandOver clears
+    -- at scoring ~3s, gbHandWonPause at 5s, gbFinishFlag at 10s), so a plan that was mid
+    -- countdown when an opponent went out is never auto-executed.  Manual Execute is
+    -- unaffected — this gates only the automatic path.
+    if gbHandWonPause or gbFinishFlag or gbHandOver then
+      gAutoExecWaitId = nil
+      UI.setAttribute("progressBarFill", "width", "0")
+      return
+    end
     remaining = remaining - 1
     local w = math.max(0, math.floor(AUTOEXEC_BAR_WIDTH * remaining / totalTicks))
     UI.setAttribute("progressBarFill", "width", tostring(w))
@@ -639,7 +650,9 @@ function showPlanPanel(plan)
     Wait.time(function()
       showPlanPanelActive()
       updatePlanNavButtons()
-      if gAutoExecEnabled then
+      -- Don't even start the auto-exec countdown if the hand is already over (an
+      -- opponent went out).  Same guard the tick uses; belt-and-suspenders.
+      if gAutoExecEnabled and not gbHandWonPause and not gbFinishFlag and not gbHandOver then
         local state       = capturedPlan and capturedPlan.state
         local noMelds     = not state or #state.melds == 0
         local hasFoot     = state and state.hasFoot

@@ -3636,9 +3636,16 @@ end
 -- ----------------------------------------------------------------------------
 
 -- Sort wild cards in-place: 2s before Jokers.
-function sortWilds(cards)
+-- Order a list of wild cards.  Default (jokersFirst nil/false): 2s before Jokers — used by
+-- the discard fallback so a FORCED wild discard sheds the cheaper 2 (20 pts) not a Joker (50).
+-- jokersFirst=true: Jokers before 2s — used when PLAYING wilds (e.g. completing a wild book)
+-- so the higher-value wilds go onto the table and any wilds left HELD in hand are the cheap 2s.
+function sortWilds(cards, jokersFirst)
   table.sort(cards, function(a, b)
-    return (a.rank == "Joker" and 1 or 0) < (b.rank == "Joker" and 1 or 0)
+    local aj = (a.rank == "Joker") and 1 or 0
+    local bj = (b.rank == "Joker") and 1 or 0
+    if jokersFirst then return aj > bj end
+    return aj < bj
   end)
 end
 
@@ -5045,7 +5052,7 @@ function executeMoveBooks(plan)
   -- Net: delay + 0.4.  setCardDecal calls countScoreInternal internally so it
   -- also corrects the book-count used for scoring.
   local finalDelay = delay + 0.4
-  Wait.time(function()
+  local function refreshIconsAndScore()
     pcall(setCardDecal)
     pcall(function()
       if bRunScoring then
@@ -5055,7 +5062,15 @@ function executeMoveBooks(plan)
         end
       end
     end)
-  end, finalDelay)
+  end
+  -- Refresh twice: once promptly, then again after a settle delay.  The first pass can
+  -- race the book's setPositionSmooth/zone-registration — the freshly-arrived Deck may not
+  -- be in the destination zone's getObjects() yet, so countScoreInternal undercounts and
+  -- its icon is skipped (intermittent missing black/red/wild icons).  The second pass
+  -- re-counts after the book has settled, so the icon distribution always catches up
+  -- without waiting for the next unrelated event to trigger setCardDecal.
+  Wait.time(refreshIconsAndScore, finalDelay)
+  Wait.time(refreshIconsAndScore, finalDelay + 2.5)
 end
 
 --==============================================================================

@@ -247,20 +247,33 @@ function onObjectPickUp(colorName, object)
 end
 
 function onObjectLeaveContainer(bag, obj)
-  debug("Object " .. obj.guid .. " left container " .. bag.guid, "discard")
-  if (objectInZone(obj, obj_Zone_Discard)) then
-    tablepush(fromdiscard,obj.guid)
-    Wait.time(function() tablepop(fromdiscard,obj.guid) end,2.0,0)
+  -- Capture identifiers via guarded property reads.  TTS can fire this mid-merge with
+  -- a transiently-invalid reference; touching it then throws a C# "Object reference not
+  -- set" error (same hazard as onObjectEnterContainer).  Read .guid (a property, safer
+  -- than method calls), bail if it fails, and use the captured strings thereafter so the
+  -- deferred Wait.time closures never re-touch obj.
+  local okO, lGuid = pcall(function() return obj.guid end)
+  if not okO or not lGuid then return end
+  local okB, lBagGuid = pcall(function() return bag.guid end)
+  if not okB then lBagGuid = nil end
+
+  debug("Object " .. lGuid .. " left container " .. tostring(lBagGuid), "discard")
+  if obj_Zone_Discard then
+    local okZ, inDiscard = pcall(function() return objectInZone(obj, obj_Zone_Discard) end)
+    if okZ and inDiscard then
+      tablepush(fromdiscard, lGuid)
+      Wait.time(function() tablepop(fromdiscard, lGuid) end, 2.0, 0)
+    end
   end
-  if not gbInitializing and mainDeck then
+  if not gbInitializing and mainDeck and lBagGuid then
     -- local player, idx = findUsedThing(tablePlayerDecks, bag.getGUID())
     --log ("b: " .. bag.guid)
     --log ("md: " ..mainDeck.getGUID())
     --log ("#fd:" .. #fromdeck)
 
-    if (bag.guid == mainDeck.guid) then
-      tablepush(fromdeck, obj.guid)
-      Wait.time(function() tablepop(fromdeck,obj.guid) end,2.0,0)
+    if (lBagGuid == mainDeck.guid) then
+      tablepush(fromdeck, lGuid)
+      Wait.time(function() tablepop(fromdeck, lGuid) end, 2.0, 0)
     end
 
   --   if (player) then
@@ -277,15 +290,14 @@ function onObjectLeaveContainer(bag, obj)
 end
 
 function onObjectEnterContainer(bag, obj)
-  if (gbSpreading) then
-    debug('Skipped one')
-  end
-  if not gbInitializing  and not gbSpreading then
-    local lGuid = obj.getGUID()
-    local lTag = obj.tag
-    local lDesc = obj.getDescription()
-    --Wait.time(function() enteredAndWaited(bag,lGuid,lTag, lDesc)  end, 0.5)
-  end
+  -- Intentionally a no-op.  When cards collapse into a book Deck (e.g. auto-exec
+  -- forming a wild book), TTS invalidates the entering Card object's reference AS
+  -- this event fires.  Calling obj.getGUID()/obj.getDescription() on it throws a
+  -- C# "Object reference not set to an instance of an object" error that ESCAPES
+  -- pcall (same hazard documented in executeTurnPlan — you cannot guard it, you can
+  -- only avoid touching the merging reference).  The values previously computed here
+  -- were never used (their only consumer, enteredAndWaited, is a no-op), so we simply
+  -- do not access obj at all.
 end
 
 function objectInZone(obj, zone)

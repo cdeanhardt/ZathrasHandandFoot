@@ -296,12 +296,24 @@ function evalMeldsToPlay(state, anyOpponentNearGoOut)
                 reason = string.format("new red meld: %d cards of rank %s (book exists; independent meld)",
                   count, rank)
               else
-                -- count < 3: can't start a new meld; play onto existing book at p5.
-                -- Priority 5 = lowest; the hand-count pruning (≥2 cards after plays)
-                -- will trim this if it would leave the hand too small.
-                priority = 5
-                reason = string.format("extends %s book: %d on table + %d from hand",
-                  meldColor, existingCount, count)
+                -- count < 3: can't start a new meld.  Dumping a card onto an
+                -- ALREADY-COMPLETE book has no strategic value on its own — it only
+                -- empties the hand and throws away a card that could later form a
+                -- meld or serve as a discard.  Generate this p5 play ONLY when it
+                -- can serve a purpose the bot still needs:
+                --   * pre-foot (state.hasFoot): emptying the hand may pick up the foot
+                --   * an opponent is one book from going out: dump the hand defensively
+                -- Genuine go-out scenarios are handled separately: buildTurnPlan's
+                -- dedicated go-out passes (second-pass + p5-goout extension) re-add
+                -- the needed book extensions from scratch, so suppressing here never
+                -- blocks a real go-out.  Otherwise hold the card in hand.
+                if state.hasFoot or anyOpponentNearGoOut then
+                  priority = 5
+                  reason = string.format("extends %s book: %d on table + %d from hand",
+                    meldColor, existingCount, count)
+                else
+                  skip = true
+                end
               end
             else
               priority = 3
@@ -962,12 +974,14 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
     L("Wild plays: wild book completion allowed pre-foot (completes 1500-pt book this turn)")
   end
 
-  -- Gather wilds: 2s before Jokers
+  -- Gather wilds, Jokers first: wilds are consumed in this order by assignWild, so when a
+  -- wild book (or any meld) is completed the Jokers go onto the table and any wilds left
+  -- HELD in hand are the cheaper 2s — minimising the end-of-hand penalty on held wilds.
   local wildCards = {}
   for _, card in ipairs(state.hand) do
     if card.color == "Wild" then table.insert(wildCards, card) end
   end
-  sortWilds(wildCards)
+  sortWilds(wildCards, true)
 
   local nextWild = 1
   local allocs   = {}
@@ -1405,8 +1419,14 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
     L(string.format("  [p4-skip] only %d wild(s) left — need 3+ for new wild meld", wildsLeft4))
   end
   if wildsLeft4 >= 3 and not melds["2"] and not melds["Joker"] and allowPhase4 then
+    -- Cap the new wild book at exactly 7 cards.  A fresh pile starts from 0 wilds on the
+    -- table, so the cap is a flat 7.  Extra wilds beyond the 7 needed are deliberately NOT
+    -- dumped here — they stay in hand (held) so they can convert OTHER rank melds into
+    -- black books on a later turn.  (evalDiscard never discards a wild unless the whole
+    -- hand is wild, so leftovers are genuinely saved, not lost.)  The only thing that
+    -- places these extras directly this turn is the go-out path, which must empty the hand.
     local assigned = {}
-    while nextWild <= #wildCards do
+    while nextWild <= #wildCards and #assigned < 7 do
       table.insert(assigned, wildCards[nextWild])
       nextWild = nextWild + 1
     end
@@ -2658,6 +2678,30 @@ function executeTurnPlan(plan)
                     table.insert(safe, obj)
                   end
                 end
+              end
+              -- Column-aware guard.  Both scans above gather wilds by RANK (getTableCardsOfRank
+              -- returns rank-2 wilds embedded in OTHER melds too) or by a flat 3.0 radius — either
+              -- can reach into an ADJACENT meld column and pull a wild embedded there into this
+              -- wild book.  That over-fills the book past 7 AND strips the neighbour meld of its
+              -- black-book wild.  Keep only cards in the wild meld's OWN column: lateral-axis
+              -- offset from the deposit point within half a column gap (inter-column spacing is
+              -- ~3+ units; in-column wilds sit at ~0 offset, so 1.5 cleanly separates them).
+              do
+                local decode  = getPlayerDecodeDir(sColor)
+                local latAxis = (decode and decode[1]) or "x"
+                local LAT_BAND = 1.5
+                local filtered = {}
+                for _, obj in ipairs(safe) do
+                  local keep = false
+                  pcall(function()
+                    local opos = obj.getPosition()
+                    if opos and math.abs(opos[latAxis] - capturedPos[latAxis]) <= LAT_BAND then
+                      keep = true
+                    end
+                  end)
+                  if keep then table.insert(filtered, obj) end
+                end
+                safe = filtered
               end
               if #safe > 0 then stackOrSpread(safe, capturedPos) end
             end)
