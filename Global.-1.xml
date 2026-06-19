@@ -228,7 +228,7 @@
                 active="false"
                 onClick="click_ActionDiscard" />
         <!-- Build stamp. Bumped by Claude on each requested change. -->
-        <Text id="ActionVersionStamp" text="v16"
+        <Text id="ActionVersionStamp" text="v23"
               width="180" height="16"
               rectAlignment="LowerCenter" offsetXY="0 3"
               fontSize="12" color="#444444" alignment="MiddleCenter" />

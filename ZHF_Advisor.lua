@@ -2427,12 +2427,26 @@ function executeTurnPlan(plan)
       totalQty = totalQty + q
     end
     if totalQty >= 7 then
+      -- Co-locate the cards and let TTS physics fuse them into a Deck.  Physics is reliable
+      -- at FORMING a deck from loose cards (building one via putObject from a single-card
+      -- base is flaky and was leaving books unformed); its only weakness is occasionally
+      -- leaving one card unmerged.  So after a short settle, reclaimColumnStragglers
+      -- putObjects any leftover loose card INTO the formed Deck (reliable deck-base merge)
+      -- before the book is moved.
       for _, obj in ipairs(objs) do
         pcall(function() obj.setPosition(stackPos) end)
       end
+      -- Settle (2.0s) lets the co-located cards fuse into one Deck before we reclaim; the
+      -- 2.0s pause after reclaim lets that merge finish before checkAndMoveBooks carries the
+      -- book off — otherwise it can move as two pieces, shedding a card half-way.
       Wait.time(function()
-        pcall(function() checkAndMoveBooks(sColor) end)
-      end, 2.5)
+        pcall(function() reclaimColumnStragglers(sColor, stackPos) end)
+        Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+      end, 2.0)
+      Wait.time(function()
+        pcall(function() reclaimColumnStragglers(sColor, stackPos) end)
+        Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+      end, 4.0)
     else
       local anchorPos
       pcall(function() anchorPos = objs[1].getPosition() end)

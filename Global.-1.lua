@@ -19,6 +19,12 @@ gbHandWonPause  = false
 gbHandOver      = false  -- true from when someone goes out until next hand is dealt
 gsSavedDate     = ""    -- date string at last save; used to detect a new day on reload
 gCompletedGames = {}    -- snapshots of games completed today; persisted via onSave/onLoad
+gsVersion       = "v23"  -- code version; onLoad pushes this to the ActionVersionStamp UI text.
+                         -- BUMP THIS (the Lua constant) per code-change request — it's the
+                         -- source of truth.  The static text in Global.-1.xml is just a fallback
+                         -- shown before onLoad runs.  Lua-set so a hot-reload (Ctrl+Alt+S) always
+                         -- repaints it; if the panel ever shows an OLD value, the Lua genuinely
+                         -- didn't load (real clobber detector).
 gLEFT  = 0
 gRIGHT = 1
 gUP    = 2
@@ -1203,6 +1209,10 @@ function onLoad(saved_data)
       UI.setAttribute("toggleAutodraw", "isOn",
         playerStuff["White"].bAutodraw and "True" or "False")
     end
+    -- Stamp the loaded code version onto the panel.  setAttribute repaints a live element,
+    -- unlike the static XML text (which a hot-reload doesn't always rebuild), so this makes
+    -- the version on screen reliably reflect the code that actually loaded.
+    pcall(function() UI.setAttribute("ActionVersionStamp", "text", gsVersion) end)
     Wait.time(function() gSuppressToggleCallbacks = false end, 0.5)
   end, 2.0)
 
@@ -2415,9 +2425,21 @@ function spread4(player, desiredPos, tCards)
               spinnableCards[sOrder].setRotation(rot90)
             end
           end
-          -- Book complete: after cards have settled into a Deck, move it to zone 2/3.
-          -- setCardDecal is called inside executeMoveBooks after the book has arrived.
-          Wait.time( function() pcall(function() checkAndMoveBooks(player) end) end, 2.5)
+          -- The cards co-located above fuse into a Deck via physics (reliable at FORMING the
+          -- deck).  After they settle, reclaimColumnStragglers putObjects any card physics
+          -- left loose INTO the formed Deck (reliable deck-base merge), then we move it.
+          local bookAnchor = shallowCopy(pos)
+          -- Settle (2.0s) lets the smooth-moved cards fuse into one Deck before we reclaim;
+          -- the 2.0s pause after reclaim lets that merge finish before checkAndMoveBooks moves
+          -- the book — otherwise it can move as two pieces, shedding a card half-way.
+          Wait.time( function()
+            pcall(function() reclaimColumnStragglers(player, bookAnchor) end)
+            Wait.time(function() pcall(function() checkAndMoveBooks(player) end) end, 2.0)
+          end, 2.0)
+          Wait.time( function()
+            pcall(function() reclaimColumnStragglers(player, bookAnchor) end)
+            Wait.time(function() pcall(function() checkAndMoveBooks(player) end) end, 2.0)
+          end, 4.0)
 
       -- if we're neither near-bookable 6 cards or stackable 7+ cards, Then
       -- we just need to plunk all the spinnable cards down at the bottom
@@ -4065,6 +4087,63 @@ function getCardsNearPos(sColor, pos, radius)
   return result
 end
 
+--==============================================================================
+-- Straggler reclaim: after cards have been co-located and TTS physics has (mostly) fused
+-- them into a book Deck, absorb any card physics left LOOSE into that Deck.  Physics is
+-- reliable at FORMING a deck from loose cards but occasionally leaves one unmerged; this
+-- catches that leftover.
+--
+-- SAFETY (do not relax): this merges by POSITION, not by rank, so it must never fuse two
+-- real BOOKS.  The discriminator is QUANTITY, not deck-vs-card: a finished book is qty>=7,
+-- while a meld still coming together is made of pieces that are each qty<7 (loose cards AND
+-- small sub-decks — e.g. an accidental 3+4 split that should book up).  So:
+--   * it only ever ABSORBS pieces with qty<7 into the base (never pulls in a qty>=7 book);
+--   * if two or more COMPLETE books (qty>=7) are co-located it bails entirely (those could
+--     be two distinct books that drifted near each other, e.g. packed side-zone books —
+--     fusing them makes a mixed, scoreless, uncollectable deck).
+-- It also never runs during dealing/setup (cards in motion), and a lateral-axis filter keeps
+-- the sweep inside this meld's own column.
+function reclaimColumnStragglers(sColor, anchorPos)
+  if not anchorPos then return end
+  if gbDealing or gbInitializing then return end   -- never merge while cards are being dealt/reset
+  local decode  = getPlayerDecodeDir(sColor)
+  local latAxis = (decode and decode[1]) or "x"
+  local nearby  = getCardsNearPos(sColor, anchorPos, 3.0)
+  local inColumn, completeBooks = {}, 0
+  for _, obj in ipairs(nearby) do
+    local inCol, qty = false, 1
+    pcall(function()
+      local p = obj.getPosition()
+      if p and math.abs(p[latAxis] - anchorPos[latAxis]) <= 1.5 then inCol = true end
+      local q = obj.getQuantity(); if q and q >= 1 then qty = q end
+    end)
+    if inCol then
+      table.insert(inColumn, {obj=obj, qty=qty})
+      if qty >= 7 then completeBooks = completeBooks + 1 end
+    end
+  end
+  if completeBooks >= 2 then return end   -- two finished books co-located: never risk fusing them
+  if #inColumn < 2 then return end
+  table.sort(inColumn, function(a, b) return a.qty > b.qty end)
+  -- If the largest object is ALREADY a complete book (qty>=7) it is finished — do nothing.
+  -- Absorbing other pieces into a completed book is exactly what was bloating the wild book
+  -- (7 -> 9 -> 12...): a separate wild sub-deck played near the finished wild book got pulled
+  -- in, producing an oversized, unscoreable, uncollectable deck.  A book is never grown.
+  if inColumn[1].qty >= 7 then return end
+  -- Base is an incomplete pile.  Absorb other incomplete (qty<7) pieces — loose cards AND
+  -- sub-decks of this meld, so a split meld books up — but STOP at 7 so the book is never
+  -- over-filled.  A qty>=7 neighbour is never absorbed.
+  local base    = inColumn[1].obj
+  local baseQty = inColumn[1].qty
+  for i = 2, #inColumn do
+    if baseQty >= 7 then break end
+    if inColumn[i].qty < 7 then
+      local add = inColumn[i].qty
+      pcall(function() local m = base.putObject(inColumn[i].obj); if m then base = m end end)
+      baseQty = baseQty + add
+    end
+  end
+end
 
 --==============================================================================
 -- Moves all red 3s (3♥ / 3♦) from the player's hand to the red-3 side-stack

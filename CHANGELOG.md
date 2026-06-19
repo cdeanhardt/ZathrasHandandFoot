@@ -13,6 +13,86 @@ function, and intent so the change can be located and verified against current c
 
 ---
 
+## v23 — 2026-06-17
+**Version stamp is now Lua-driven so it reliably reflects the loaded code.** The static XML
+`text` on `ActionVersionStamp` isn't always rebuilt on a Ctrl+Alt+S hot-reload, so the panel
+could show a stale version even when the new code was live. Added `gsVersion` constant in
+`Global.-1.lua` and an `UI.setAttribute("ActionVersionStamp","text",gsVersion)` in onLoad
+(setAttribute repaints a live element). `gsVersion` is now the bump point (source of truth);
+the XML text is just a pre-onLoad fallback. Bonus: if the panel ever shows an OLD number now,
+the Lua genuinely didn't load — a real clobber detector.
+
+## v22 — 2026-06-17
+**Lengthened the pause-before-move by another second** (1.0s → 2.0s) in both `stackOrSpread`
+(`ZHF_Advisor.lua`) and `spread4` (`Global.-1.lua`), per request — books were still
+occasionally moving before the merge fully settled. Settle-before-reclaim stays 2.0s; the
+post-reclaim pause before `checkAndMoveBooks` is now 2.0s.
+
+## v21 — 2026-06-15
+Two more reclaim/timing fixes:
+- **Wild book bloating to 9/12 cards and becoming unscoreable/uncollectable.** The reclaim
+  absorbed `qty<7` pieces into the LARGEST object — so a separate wild sub-deck played near an
+  already-complete wild book got pulled into it (7→12). Fixed (`Global.-1.lua`
+  `reclaimColumnStragglers`): if the largest object in the column is already a complete book
+  (qty>=7) it does nothing (never grows a finished book), and absorption now STOPS at 7 so a
+  book can't be over-filled. (Diagnosed: 12 = a 7 book + ~5 pile, not two 7s fusing.)
+- **Books moving as two pieces / shedding a card mid-move despite the v19 pause.** The merge
+  wasn't finished when the move fired. Lengthened the timing in both `stackOrSpread`
+  (`ZHF_Advisor.lua`) and `spread4` (`Global.-1.lua`): settle-before-reclaim 1.5s→2.0s, and
+  pause-before-move 0.5s→1.0s.
+
+Note: wild decks already bloated by earlier versions are corrupted in-save and won't be
+repaired by this — they must be removed manually.
+
+## v20 — 2026-06-15
+**Refined the v19 reclaim guard so it doesn't block legitimate consolidation.** v19's "bail if
+2+ Decks in the column" couldn't distinguish two finished books (must NOT fuse) from two
+incomplete sub-decks of the same meld (an accidental 3+4 split that SHOULD book up) — so it
+would have prevented booking a split meld. Changed the discriminator from deck-vs-card to
+QUANTITY (`Global.-1.lua` `reclaimColumnStragglers`): it now bails only when 2+ COMPLETE books
+(qty>=7) are co-located, and otherwise absorbs every qty<7 piece (loose cards AND sub-decks)
+into the largest base while never pulling in a qty>=7 neighbour. Keeps the two-books-fuse
+protection and the deal/setup guard, but lets split/sub-deck melds consolidate and book.
+
+## v19 — 2026-06-15
+Two fixes to the v18 book/reclaim work:
+- **`reclaimColumnStragglers` could fuse two real books into a mixed, scoreless, uncollectable
+  deck** (it merged by position, not rank — seen as two of Blue's books collapsing at new-hand
+  deal). Hardened (`Global.-1.lua`): it now ONLY absorbs loose single Cards (tag=="Card") into
+  exactly ONE Deck base; if two+ Decks are in the column it bails (never fuses Decks together);
+  and it no-ops while `gbDealing`/`gbInitializing` (cards in motion during deal/reset).
+- **Cards sometimes started moving to the score zone before the book finished assembling**, so
+  one dropped half-way. Added a 0.5s pause between booking (reclaim) and moving
+  (`checkAndMoveBooks`) in both `stackOrSpread` (`ZHF_Advisor.lua`) and `spread4`'s book branch
+  (`Global.-1.lua`) — reclaim, let it settle, then move.
+
+## v18 — 2026-06-14
+**Reverted v17's putObject formation (it regressed book-forming); kept the straggler fix a
+different way.** v17 built the book by `putObject`-ing loose cards into a single-card base —
+which is flaky (the first card+card merge often returns nil), so books frequently failed to
+form at all. Reverted `stackOrSpread` and `spread4`'s ≥7 branch to the original physics
+formation (co-locate via setPosition/setPositionSmooth — reliable at FORMING a deck). Added
+new global `reclaimColumnStragglers(sColor, anchorPos)` (`Global.-1.lua`): after a settle
+delay it re-scans the meld's own column (lateral filter, same 1.5-unit band as v15) and
+`putObject`s any card physics left loose INTO the formed Deck — a reliable DECK-base merge —
+before the book is moved. Both paths now call it (at 1.5s and 3.5s) ahead of checkAndMoveBooks.
+Net: reliable formation (physics) + reliable straggler reclaim (deck-base putObject), fixing
+the original "card left behind" without the v17 regression. `bookByStacking` still unchanged.
+
+## v17 — 2026-06-14
+**Book formation no longer strands a card ("card left behind").** Two consolidation paths
+formed books by co-locating cards with `setPosition`/`setPositionSmooth` and relying on TTS
+physics to fuse them — non-deterministic, so a card could fail to merge and be stranded, and
+`checkAndMoveBooks` (timer-driven, no settle check) could move the deck out from under a
+still-settling card. Converted both to deterministic, synchronous `putObject` merges (the
+approach `bookByStacking` already used and documented as reliable):
+- `stackOrSpread` (`ZHF_Advisor.lua`) — wild / auto-exec book consolidation.
+- `spread4` ≥7 book branch (`Global.-1.lua`) — manual drops / "Layout Pretty". Cards are
+  still spread (separate, valid refs) at that point, so they're safe to `putObject` directly.
+Because putObject is synchronous the Deck reaches full size before the move timers fire,
+fixing both the dropped-card and move-race mechanisms. `bookByStacking` was already robust
+and left unchanged. No clones were involved — the stray was always a real, unmerged card.
+
 ## v16 — 2026-06-14
 **Play Jokers before 2s when committing wilds.** `sortWilds` (`Global.-1.lua`) gained a
 `jokersFirst` parameter. The wild-allocation gather in `evalWildAllocations` (`ZHF_Advisor.lua`)
