@@ -19,7 +19,7 @@ gbHandWonPause  = false
 gbHandOver      = false  -- true from when someone goes out until next hand is dealt
 gsSavedDate     = ""    -- date string at last save; used to detect a new day on reload
 gCompletedGames = {}    -- snapshots of games completed today; persisted via onSave/onLoad
-gsVersion       = "v23"  -- code version; onLoad pushes this to the ActionVersionStamp UI text.
+gsVersion       = "v33"  -- code version; onLoad pushes this to the ActionVersionStamp UI text.
                          -- BUMP THIS (the Lua constant) per code-change request — it's the
                          -- source of truth.  The static text in Global.-1.xml is just a fallback
                          -- shown before onLoad runs.  Lua-set so a hot-reload (Ctrl+Alt+S) always
@@ -2434,11 +2434,11 @@ function spread4(player, desiredPos, tCards)
           -- the book — otherwise it can move as two pieces, shedding a card half-way.
           Wait.time( function()
             pcall(function() reclaimColumnStragglers(player, bookAnchor) end)
-            Wait.time(function() pcall(function() checkAndMoveBooks(player) end) end, 2.0)
+            Wait.time(function() pcall(function() checkAndMoveBooks(player) end) end, 2.5)
           end, 2.0)
           Wait.time( function()
             pcall(function() reclaimColumnStragglers(player, bookAnchor) end)
-            Wait.time(function() pcall(function() checkAndMoveBooks(player) end) end, 2.0)
+            Wait.time(function() pcall(function() checkAndMoveBooks(player) end) end, 2.5)
           end, 4.0)
 
       -- if we're neither near-bookable 6 cards or stackable 7+ cards, Then
@@ -3334,16 +3334,154 @@ end
 
 -- Returns a list of {rank, suit, color, obj} for every card in sColor's hand.
 -- Wilds are included.  'obj' is the live TTS object reference.
-function getHandCards(sColor)
-  local result = {}
+-- TEMPORARY hotseat diagnostic — dumps where this color's hand cards physically are and
+-- what getHandObjects / the hand-zone box-cast each see.  Remove once hotseat is sorted.
+function debugHand(sColor)
+  sColor = sColor or "White"
+  local function L(s) log("[HANDDBG] " .. tostring(s)) end
+  L("==== " .. tostring(sColor) .. " ====")
   local ok, hand = pcall(function() return Player[sColor].getHandObjects() end)
-  if not ok or not hand then return result end
-  for _, card in ipairs(hand) do
+  L("getHandObjects ok=" .. tostring(ok) .. " count=" .. tostring((ok and hand) and #hand or "nil"))
+  local seated = "?"; pcall(function() seated = tostring(Player[sColor].seated) end)
+  L("seated=" .. seated)
+  local t; pcall(function() t = Player[sColor].getHandTransform() end)
+  if not t or not t.position then L("getHandTransform = NIL"); L("==== end ===="); return end
+  L("handTransform pos=" .. dump(t.position) .. " scale=" .. dump(t.scale) .. " rot=" .. dump(t.rotation))
+  local hits
+  pcall(function()
+    hits = Physics.cast({origin=t.position, direction={0,1,0}, type=3,
+      size={t.scale.x, t.scale.y, t.scale.z},
+      orientation={t.rotation.x, t.rotation.y, t.rotation.z}, distance=0.1})
+  end)
+  L("box-cast hits=" .. tostring(hits and #hits or 0))
+  for _, h in ipairs(hits or {}) do
     pcall(function()
-      local c, r, s = cardDeets(card)
-      table.insert(result, {rank=r, suit=s, color=c, obj=card})
+      local o = h.hit_object
+      L("  hit tag=" .. tostring(o.tag) .. " q=" .. tostring(o.getQuantity()) ..
+        " name=" .. tostring(o.getName()) .. " @" .. dump(o.getPosition()))
     end)
   end
+  L("-- all Card/Deck within 15u of hand origin --")
+  pcall(function()
+    for _, o in ipairs(getAllObjects()) do
+      pcall(function()
+        if o.tag == "Card" or o.tag == "Deck" then
+          local p = o.getPosition()
+          local dx = p.x - t.position.x; local dz = p.z - t.position.z
+          if dx*dx + dz*dz < 225 then
+            L("  near tag=" .. o.tag .. " q=" .. tostring(o.getQuantity()) ..
+              " name=" .. tostring(o.getName()) .. " @" .. dump(p))
+          end
+        end
+      end)
+    end
+  end)
+  L("==== end ====")
+end
+
+-- ── Execution breadcrumb tracer ──────────────────────────────────────────────
+-- Writes step-by-step breadcrumbs to a "Debug Trace" notebook tab (easier to copy than
+-- chat).  TTS C# "Object reference not set" errors give no Lua line and escape pcall, so the
+-- LAST line written before a crash pinpoints the call that died.  Gated by gbTraceOn.
+gbTraceOn   = true
+gTraceLines = {}
+function traceClear()
+  gTraceLines = {}
+  pcall(function()
+    local idx = findOrCreateNotebookTab("Debug Trace", "Grey")
+    Notes.editNotebookTab({index=idx, title="Debug Trace", body="", color="Grey"})
+  end)
+end
+function trace(msg)
+  if not gbTraceOn then return end
+  table.insert(gTraceLines, tostring(msg))
+  while #gTraceLines > 600 do table.remove(gTraceLines, 1) end
+  pcall(function()
+    local idx = findOrCreateNotebookTab("Debug Trace", "Grey")
+    Notes.editNotebookTab({index=idx, title="Debug Trace", body=table.concat(gTraceLines, "\n"), color="Grey"})
+  end)
+end
+
+function getHandCards(sColor)
+  local result = {}
+  local seen = {}
+  -- Add a Card object once (dedup by GUID).  Non-cards and already-seen cards are ignored.
+  local function addCard(obj)
+    pcall(function()
+      if obj and obj.tag == "Card" then
+        local guid = obj.getGUID()
+        if guid and not seen[guid] then
+          seen[guid] = true
+          local c, r, s = cardDeets(obj)
+          table.insert(result, {rank=r, suit=s, color=c, obj=obj})
+        end
+      end
+    end)
+  end
+
+  -- Source 1: TTS's managed hand system.
+  local ok, hand = pcall(function() return Player[sColor].getHandObjects() end)
+  if ok and hand then
+    for _, card in ipairs(hand) do addCard(card) end
+  end
+
+  -- Source 2 (hotseat): cards dealt to a seat that isn't the live/active one never get
+  -- REGISTERED into TTS's hand system — they physically sit in the hand zone but
+  -- getHandObjects() misses them (and they don't fan).  Box-cast the hand zone itself
+  -- (via getHandTransform) and UNION in any Card found there.  This must be a merge, not an
+  -- only-if-empty fallback: a hand can be MIXED (e.g. drawn cards registered, dealt cards
+  -- not), so an empty-check would still miss the unregistered ones.  Dedup-by-GUID means
+  -- registered cards are never double-counted.  In multiplayer every hand card is both
+  -- registered AND in the zone, so the union equals getHandObjects() — no behaviour change.
+  -- A card physically inside a hand zone IS a hand card, so this adds no false positives.
+  pcall(function()
+    local t = Player[sColor].getHandTransform()
+    if not t or not t.position or not t.scale or not t.rotation then return end
+    local hits = Physics.cast({
+      origin      = t.position,
+      direction   = {0, 1, 0},
+      type        = 3,   -- box
+      size        = {t.scale.x, t.scale.y, t.scale.z},
+      orientation = {t.rotation.x, t.rotation.y, t.rotation.z},
+      distance    = 0.1,
+    })
+    local right = t.right or {x=1, y=0, z=0}
+    -- Spread position along the hand's right axis (so exploded cards don't re-merge).
+    local function spreadPos(i)
+      local off = (i - 6.5) * 1.2
+      return {x = t.position.x + (right.x or 0) * off,
+              y = t.position.y + 1.0 + i * 0.03,
+              z = t.position.z + (right.z or 0) * off}
+    end
+    for _, hit in ipairs(hits or {}) do
+      local o = hit.hit_object
+      local tag = nil; pcall(function() tag = o.tag end)
+      if tag == "Card" then
+        addCard(o)
+      elseif tag == "Deck" then
+        -- Hotseat: the dealt hand fused into a Deck instead of fanning into individual
+        -- cards.  Explode it — take each card out to a spread position so it becomes a
+        -- real object the planner can read AND play.  takeObject returns the card
+        -- synchronously, so we add the returned refs directly (no detection lag).
+        local i = 0
+        while i < 60 do
+          local cur = 0; pcall(function() cur = o.getQuantity() end)
+          if not (cur and cur >= 1) then break end   -- deck emptied / became a single card
+          i = i + 1
+          local got = nil
+          pcall(function() got = o.takeObject({position = spreadPos(i), smooth = false}) end)
+          if not got then break end
+          addCard(got)
+        end
+        -- The final card may remain AS the original object (TTS converts a 1-card deck to a
+        -- Card).  Add it too; dedup-by-GUID prevents a double-count if it was already taken.
+        pcall(function()
+          if o and o.tag == "Card" then o.setPosition(spreadPos(i + 1)); addCard(o) end
+        end)
+      end
+    end
+  end)
+
   return result
 end
 
@@ -4816,12 +4954,16 @@ function executeLayoutRank(sColor, plan, bookByStacking)
               end
             end
           end
-          pcall(function() checkAndMoveBooks(sColor) end)
+          -- Pause after the sweep/merge before moving, so the book is fully assembled into
+          -- ONE Deck before checkAndMoveBooks carries it off (otherwise it can move as two
+          -- pieces / leave a card behind).  This is the multi-second pause the other two book
+          -- paths (stackOrSpread, spread4) already have — bookByStacking was missing it.
+          Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.5)
         end, 0.8)
         -- Backup check in case TTS still needs more time to settle.
         Wait.time(function()
           pcall(function() checkAndMoveBooks(sColor) end)
-        end, 4.0)
+        end, 5.0)
         dph("stacked (putObject+sweep) " .. authTotal .. " → book (rank=" .. capturedRank .. ")")
         broadcastToColor("Layout complete for rank " .. capturedRank, sColor)
         return
@@ -5109,28 +5251,53 @@ end
 -- executeMoveBooks: animation layer for checkAndMoveBooks.
 function executeMoveBooks(plan)
   local bookRotY = plan.bookRotY or 90   -- 90° from face-up = landscape orientation
+  -- #1 Solidify: before moving a book, fuse any loose card sitting on/beside it INTO the Deck
+  -- via putObject, so a fragile physics-merge doesn't leave a straggler (or shed it onto
+  -- another book during the move).  Tight box (~one card footprint) so it can't pull in an
+  -- adjacent meld column (those are ~3 units away).  Returns the (same) deck object.
+  local function solidifyBook(deck)
+    local out = deck
+    pcall(function()
+      local bpos = out.getPosition()
+      local hits = Physics.cast({
+        origin = bpos, direction = {0,1,0}, type = 3,
+        size = {gv_CARD_SIZE.x * 0.8, 3, gv_CARD_SIZE.z * 0.8},
+        distance = 0.1,
+      })
+      for _, h in ipairs(hits or {}) do
+        local o = h.hit_object
+        pcall(function()
+          if o and o ~= out and o.tag == "Card" then
+            local m = out.putObject(o)
+            if m then out = m end
+          end
+        end)
+      end
+    end)
+    return out
+  end
   local delay = 0
   for _, move in ipairs(plan.moves) do
     local captured    = move.book
     local tPos        = move.tPos
     local capturedRot = bookRotY
-    -- Move first (no rotation) so the deck is at rest before being rotated.
-    -- Rotating instantly while stacked at the meld position shocks the physics
-    -- engine and knocks the top card off.  Rotating after arrival is gentler.
+    -- Solidify, then move.  Rotate only AFTER the book has clearly arrived: rotating while
+    -- still in motion (or freshly stacked) shocks physics and knocks the top card off, so the
+    -- rotation now waits 2.2s (was 1.2) — by then the slide has finished and it's at rest.
     Wait.time(function()
+      captured = solidifyBook(captured)   -- #1: fuse any straggler in before the slide
       pcall(function() captured.setPositionSmooth(tPos, false, false) end)
     end, delay)
     Wait.time(function()
       pcall(function() captured.setRotationSmooth({0, capturedRot, 0}, false, false) end)
-    end, delay + 1.2)
+    end, delay + 2.2)
     delay = delay + 1.6
   end
   -- After all books have arrived and rotated, refresh icons and score display.
-  -- delay now points just past the last move slot; subtract 0.4 to get when the
-  -- last rotation fires (delay-1.6+1.2), then add 0.8 for physics to settle.
-  -- Net: delay + 0.4.  setCardDecal calls countScoreInternal internally so it
+  -- Last rotation fires at (delay-1.6)+2.2 = delay+0.6; add ~0.8 for physics to settle.
+  -- Net: delay + 1.4.  setCardDecal calls countScoreInternal internally so it
   -- also corrects the book-count used for scoring.
-  local finalDelay = delay + 0.4
+  local finalDelay = delay + 1.4
   local function refreshIconsAndScore()
     pcall(setCardDecal)
     pcall(function()

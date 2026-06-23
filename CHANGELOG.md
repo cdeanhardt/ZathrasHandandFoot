@@ -13,6 +13,95 @@ function, and intent so the change can be located and verified against current c
 
 ---
 
+## v33 — 2026-06-21
+**Books shed/drop a card while moving to the score zone — two fixes** (`executeMoveBooks`,
+`Global.-1.lua`):
+- **#1 Solidify before moving.** New `solidifyBook()` box-casts a one-card footprint around the
+  Deck and `putObject`s any loose Card sitting on/beside it into the Deck before the slide, so a
+  fragile physics-merge doesn't carry a straggler that gets dropped (tight box so it can't grab
+  an adjacent column).
+- **#3 Rotate later.** The post-move rotation delay went 1.2s → 2.2s so the book has clearly
+  arrived and is at REST before rotating (rotating mid-motion shocks physics and ejects the top
+  card). finalDelay adjusted 0.4 → 1.4 accordingly.
+
+## v32 — 2026-06-20
+**Debug Trace no longer wipes itself each turn.** `executeTurnPlan` was calling `traceClear()`
+on every plan, so a crash trace got erased before it could be copied. Removed the auto-clear;
+each execution now appends a `=== execute plan ... @t= ===` separator and the buffer accumulates
+(cap raised 300→600 lines, self-trimming oldest). `traceClear()` stays available for a manual
+fresh start (or delete the tab).
+
+## v31 — 2026-06-20
+**Debug Trace tab was locked.** It was created with `color="Red"`, which locks a notebook tab
+to the Red player. Changed to `color="Grey"` (neutral/everyone) in `trace`/`traceClear` so it's
+selectable. The existing locked tab updates to Grey on the next trace write.
+
+## v30 — 2026-06-20
+Three things for the wild-completes-black-book crash (red book + "Object reference not set"):
+- **Breadcrumb tracer to a notecard.** New `trace()`/`traceClear()` (`Global.-1.lua`) write
+  step-by-step breadcrumbs to a **"Debug Trace" notebook tab** (gated by `gbTraceOn=true`).
+  Since the C# ref error escapes pcall and has no Lua line, the LAST line before a crash is
+  the culprit. Wired into `executeTurnPlan` start + the wild-on-meld branch.
+- **Crash fix.** The wild-on-meld executor used a captured `meldObj`; if a prior play booked &
+  moved that meld, the ref is dead and `getPosition()` threw the escaping C# error. Now it
+  re-fetches the position LIVE via `getMeldAnchor(rank)` (nil if gone → skip, no crash).
+- **Red-instead-of-black fix.** Gated the second-pass p5 (`ZHF_Advisor.lua`): it only fires for
+  a real go-out setup (post-foot, ≥2 red projected, wilds reach the 2nd black book). Otherwise
+  it over-filled a book the wild already completes to 7 — and being executed before the wild,
+  the natural made a RED book and stranded the wild.
+
+## v29 — 2026-06-19
+**Pause-before-move 2.0s → 2.5s in all three book paths** (cards still occasionally dropping
+off; +0.5s to catch the rest). Bumped the settle-pause in `stackOrSpread` (ZHF_Advisor, both
+passes), `spread4` (Global, both passes), and `bookByStacking` (Global). Executor backup
+checkAndMoveBooks calls left at their own timings.
+
+## v28 — 2026-06-19
+**Added the missing settle-pause to the third book path (`bookByStacking`).** The 2.0s
+pause-before-move from v21/v22 was only in `stackOrSpread` (wild) and `spread4` (manual);
+`bookByStacking` — the auto-exec NATURAL-rank book path, the most common one — still called
+checkAndMoveBooks immediately after its sweep (~0.8s), so natural books moved with no settle
+time (cards left behind / moving as two pieces). Now it waits 2.0s after the sweep before
+moving (move at ~2.8s), and the backup check moved 4.0s → 5.0s to stay after it. (`Global.-1.lua`)
+
+## v27 — 2026-06-19
+**Hotseat root cause found + fixed: dealt hand fuses into a Deck.** The v26 diagnostic showed
+the hand cards were a single `Deck` (q=12) in the hand zone — in hotseat the rapid deal lands
+cards on one spot and TTS physics merges them, instead of them entering the hand individually
+(multiplayer). `getHandCards` was only accepting `tag=="Card"`, so it skipped the deck. Now,
+when the hand-zone box-cast hits a Deck, it EXPLODES it: `takeObject`s each card out to a
+spread position (so they stay individual and don't re-merge) and adds the returned refs, which
+the planner can read and play. (debugHand diagnostic kept one more round to confirm; remove
+next.) Cosmetic fanning may still be off, but the planner now gets real card objects.
+
+## v26 — 2026-06-19
+**TEMP diagnostic build** (v24/v25 hotseat hand-read fixes didn't work; instrumenting before
+guessing again). Added `debugHand(sColor)` (`Global.-1.lua`) which logs: getHandObjects count,
+seated state, getHandTransform pos/scale/rot, what the hand-zone box-cast finds, and every
+Card/Deck within 15u of the hand origin. Called once at the top of `buildTurnPlan`
+(`ZHF_Advisor.lua`). User runs the plan in hotseat and pastes the [HANDDBG] log so we can see
+WHERE the dealt cards actually are and WHAT they are (loose Cards vs a merged Deck). REMOVE
+both the function and the buildTurnPlan call once diagnosed.
+
+## v25 — 2026-06-19
+**Hotseat hand read must MERGE, not only-if-empty (fixes v24).** v24 only ran the hand-zone
+scan when `getHandObjects()` returned 0 cards. But a hotseat hand can be MIXED — cards drawn
+on the active seat get registered, dealt cards don't — so `getHandObjects()` returned the 2
+drawn cards (non-empty), the fallback was skipped, and the planner missed the dealt cards.
+Changed `getHandCards` (`Global.-1.lua`) to always UNION both sources, deduped by GUID:
+managed hand cards + any Card physically in the hand zone. Multiplayer unchanged (the two
+sources are identical there); a card inside a hand zone is by definition a hand card, so no
+false positives. (Cosmetic fanning still unaddressed — separate issue.)
+
+## v24 — 2026-06-19
+**Auto-plan now reads the hand in hotseat mode.** `getHandCards` (`Global.-1.lua`) relied
+solely on `Player[color].getHandObjects()`, which returns the TTS-managed hand set. In hotseat,
+cards dealt to a seat that isn't the live/active one never get registered into the hand system
+(same reason they don't fan), so the planner saw an empty hand. Added a fallback: only when
+`getHandObjects()` returns 0 cards, box-cast the hand zone (`getHandTransform`) and read the
+loose Card objects physically present there. Multiplayer is unaffected — `getHandObjects()`
+always returns there, so the fallback never runs. (Hotseat untested from dev side; user verifies.)
+
 ## v23 — 2026-06-17
 **Version stamp is now Lua-driven so it reliably reflects the loaded code.** The static XML
 `text` on `ActionVersionStamp` isn't always rebuilt on a Ctrl+Alt+S hot-reload, so the panel

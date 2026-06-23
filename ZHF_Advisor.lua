@@ -1522,6 +1522,7 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
 end
 
 function buildTurnPlan(sColor)
+  pcall(function() debugHand(sColor) end)   -- TEMP hotseat diagnostic (remove after diagnosing)
   local log = {}
   local function L(msg) table.insert(log, msg) end
   local state = snapshotState(sColor)
@@ -1670,11 +1671,21 @@ function buildTurnPlan(sColor)
     end
   end
 
-  -- Second-pass natural plays: if a wild alloc just completed a book for rank R, and
-  -- the hand still contains naturals of rank R that evalMeldsToPlay suppressed (because
-  -- adding them alone would have completed a red book and more black books were needed),
-  -- those naturals can now be played as p5 (extending the newly-completed black book).
-  -- This enables the combined "natural + wild → black book" go-out sequence.
+  -- Second-pass natural plays: when a wild completes a black book for rank R and the hand
+  -- still has naturals of R, dump them onto that book.  GATE: only for a genuine GO-OUT
+  -- setup.  Otherwise it over-fills a book the wild already completes to 7 — and because the
+  -- executor plays naturals BEFORE wilds, that extra natural lands first, makes a RED book,
+  -- moves it, and strands the wild (C# ref error).  Go-out setup = post-foot, >=2 red
+  -- projected, and these wilds reach the 2nd black book (the only case dumping naturals helps).
+  local blackCompletions = 0
+  for _, wa in ipairs(wildAllocs) do
+    if wa.completesBook and not wa.isWildMeld and wa.rank ~= "__wild__" then
+      blackCompletions = blackCompletions + 1
+    end
+  end
+  local secondPassOk = (not state.hasFoot) and (projRedFromMelds >= 2)
+                       and (state.bookCounts.black + blackCompletions >= 2)
+  if secondPassOk then
   for _, wa in ipairs(wildAllocs) do
     if wa.completesBook and not wa.isWildMeld and wa.rank ~= "__wild__" then
       local rank = wa.rank
@@ -1703,6 +1714,7 @@ function buildTurnPlan(sColor)
       end
     end
   end
+  end  -- if secondPassOk
 
   -- Log melds (after potential opening minimum suppression).
   if #melds == 0 then
@@ -2409,6 +2421,14 @@ end
 function executeTurnPlan(plan)
   if not plan.ok then return end
   local sColor = plan.color
+  pcall(function()
+    -- Do NOT clear here — clearing every execution would wipe a crash trace before it can be
+    -- copied.  Append a separator instead; the buffer self-trims (capped).  Use traceClear()
+    -- manually (or delete the tab) for a fresh start.
+    trace("")
+    trace("=== execute plan: " .. tostring(sColor) .. " melds=" .. #(plan.melds or {}) ..
+          " wilds=" .. #(plan.wildAllocs or {}) .. " @t=" .. tostring(Time and Time.time or "?") .. " ===")
+  end)
 
   -- Returns a random inter-play pause when Enhance is enabled, else 0.
   local function enhancePause()
@@ -2441,11 +2461,11 @@ function executeTurnPlan(plan)
       -- book off — otherwise it can move as two pieces, shedding a card half-way.
       Wait.time(function()
         pcall(function() reclaimColumnStragglers(sColor, stackPos) end)
-        Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+        Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.5)
       end, 2.0)
       Wait.time(function()
         pcall(function() reclaimColumnStragglers(sColor, stackPos) end)
-        Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.0)
+        Wait.time(function() pcall(function() checkAndMoveBooks(sColor) end) end, 2.5)
       end, 4.0)
     else
       local anchorPos
@@ -2637,9 +2657,14 @@ function executeTurnPlan(plan)
       -- Wild-only play onto existing meld.
       Wait.time(function()
         pcall(function()
-          local meldObj = capturedWa.meldObj
-          local ok_p, pos = pcall(function() return meldObj.getPosition() end)
-          if not ok_p or not pos then return end
+          -- Re-fetch the meld position LIVE by rank instead of using the captured meldObj.
+          -- A prior play this turn may have completed this meld into a book and MOVED it,
+          -- which invalidates meldObj; calling a method on it throws a C# "Object reference
+          -- not set" that escapes pcall.  getMeldAnchor re-scans current melds/books (nil if gone).
+          trace("wild-on-meld rank=" .. tostring(capturedWa.rank) .. ": fetching live anchor")
+          local pos = getMeldAnchor(sColor, capturedWa.rank)
+          if not pos then trace("  anchor nil (meld moved/gone) — skip wild") return end
+          trace("  anchor=" .. dump(pos) .. " placing " .. #capturedWa.wilds .. " wild(s)")
           local dt = 0
           for _, card in ipairs(capturedWa.wilds) do
             local capturedCard = card
