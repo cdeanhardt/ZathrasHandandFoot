@@ -17,9 +17,13 @@ gi_OPENING_MELD_MIN = {50, 90, 120, 150}  -- point minimum for first meld, by ha
 GT_SWEEP_SETTLE_DELAY = 2.0               -- seconds after last play before post-execution meld sweep
 gbHandWonPause  = false
 gbHandOver      = false  -- true from when someone goes out until next hand is dealt
+gbAutoSuppress  = false  -- true from go-out until the NEXT deal: suppresses autodraw/autoexec
+                         -- for the rest of the ended hand, then cleared in initializeHand so
+                         -- auto resumes on the new hand's turn.  (gbHandOver resets at scoring,
+                         -- too early for this — see ZHF_Scoring.recordScores.)
 gsSavedDate     = ""    -- date string at last save; used to detect a new day on reload
 gCompletedGames = {}    -- snapshots of games completed today; persisted via onSave/onLoad
-gsVersion       = "v33"  -- code version; onLoad pushes this to the ActionVersionStamp UI text.
+gsVersion       = "v39"  -- code version; onLoad pushes this to the ActionVersionStamp UI text.
                          -- BUMP THIS (the Lua constant) per code-change request — it's the
                          -- source of truth.  The static text in Global.-1.xml is just a fallback
                          -- shown before onLoad runs.  Lua-set so a hot-reload (Ctrl+Alt+S) always
@@ -234,7 +238,7 @@ function onPlayerTurnStart(player_color, prev_player_color)
   if ps and player_color ~= "White" then
     ps.bAutodraw = false
   end
-  if ps and ps.bAutodraw and not gbHandWonPause and not gbFinishFlag and not gbHandOver then
+  if ps and ps.bAutodraw and not gbHandWonPause and not gbFinishFlag and not gbHandOver and not gbAutoSuppress then
     triggerAutodraw(player_color)
   end
 end
@@ -563,6 +567,7 @@ end
 function initializeHand()
   -- fire up a new hand... restack cards, and shuffle
   gbHandOver     = false
+  gbAutoSuppress = false   -- new hand: allow autodraw/autoexec again on the next turn
   gbInitializing = true
   local maindeck = stackCards()
   initializeVariables()
@@ -5281,24 +5286,40 @@ function executeMoveBooks(plan)
     local captured    = move.book
     local tPos        = move.tPos
     local capturedRot = bookRotY
-    -- Solidify, then move.  Rotate only AFTER the book has clearly arrived: rotating while
-    -- still in motion (or freshly stacked) shocks physics and knocks the top card off, so the
-    -- rotation now waits 2.2s (was 1.2) — by then the slide has finished and it's at rest.
+    -- Lift the book well clear of the table (~3x higher off the board), carry it ACROSS at that
+    -- height to above its slot, then lower it straight in.  Travelling high keeps it from
+    -- dragging through neighbouring melds and mixing their cards in.  Three phases, spaced so
+    -- each setPositionSmooth finishes before the next (a later call would override an earlier
+    -- one).  Rotate only after it has dropped in and settled.
     Wait.time(function()
-      captured = solidifyBook(captured)   -- #1: fuse any straggler in before the slide
-      pcall(function() captured.setPositionSmooth(tPos, false, false) end)
+      captured = solidifyBook(captured)   -- #1: fuse any straggler in before lifting
+      pcall(function()
+        local p = captured.getPosition()
+        local raisedY = p.y + 2.0   -- lift ~2.0 board units (≈2 inches; 1 unit ≈ 1.2") above the
+                                    -- deck's resting height, to clear the other melds.  Tunable.
+        captured.setPositionSmooth({p.x, raisedY, p.z}, false, false)              -- 1: straight up
+        Wait.time(function()
+          pcall(function() captured.setPositionSmooth({tPos.x, raisedY, tPos.z}, false, false) end)  -- 2: across, high
+        end, 1.0)
+        Wait.time(function()
+          pcall(function() captured.setPositionSmooth(tPos, false, false) end)     -- 3: down into the slot
+        end, 2.0)
+      end)
     end, delay)
     Wait.time(function()
       pcall(function() captured.setRotationSmooth({0, capturedRot, 0}, false, false) end)
-    end, delay + 2.2)
-    delay = delay + 1.6
+    end, delay + 3.7)
+    delay = delay + 2.7
   end
   -- After all books have arrived and rotated, refresh icons and score display.
-  -- Last rotation fires at (delay-1.6)+2.2 = delay+0.6; add ~0.8 for physics to settle.
-  -- Net: delay + 1.4.  setCardDecal calls countScoreInternal internally so it
-  -- also corrects the book-count used for scoring.
-  local finalDelay = delay + 1.4
+  -- Last book: drop finishes ~delay+3.0, rotation at delay+3.7; add settle margin.
+  local finalDelay = delay + 2.0
   local function refreshIconsAndScore()
+    -- Now that each book has parked in its slot, re-stack its top card (red/black/joker).
+    -- Stationary by now, and restackBookTop has its own motion guard, so it's safe here.
+    for _, move in ipairs(plan.moves) do
+      pcall(function() restackBookTop(move.book) end)
+    end
     pcall(setCardDecal)
     pcall(function()
       if bRunScoring then
@@ -6102,6 +6123,7 @@ function checkFootNote(sColor, iCheckCount)
           gbHandWonPause = true
           gbFinishFlag   = true
           gbHandOver     = true
+          gbAutoSuppress = true   -- no autodraw/autoexec for the rest of this ended hand
           local iHandAtEnd = giHand   -- capture now; giHand may change if user deals before 9s
           Wait.time(function() recordScores(iHandAtEnd) end, 3.0)
           Wait.time(function() gbFinishFlag=false; setCardDecal(); end, 10.0)
@@ -6178,6 +6200,58 @@ function hoverTroll()
     end
   end
   return 1
+end
+
+-- Re-stack a book so the correct card shows on top: red on a red book, black on a black book,
+-- joker on a wild book.  This used to be a side effect of scoreTarget (called on every scoring
+-- and meld scan — INCLUDING mid-book-move), where the takeObject flung cards off moving decks.
+-- It now lives here and runs ONLY on a STATIONARY, valid book.  Callers: onObjectEnterContainer
+-- (when a card is added by auto-play or a player) and executeMoveBooks (after a book parks).
+function restackBookTop(deck)
+  if not deck then return end
+  pcall(function()
+    if deck.tag ~= "Deck" then return end
+    local qty = deck.getQuantity()
+    if not qty or qty < 7 or qty > 20 then return end   -- books only; excludes main/discard piles
+    -- Motion guard: never pull a card from a moving deck — that is what dropped cards mid-move.
+    local v = deck.getVelocity()
+    if v and (math.abs(v.x) + math.abs(v.y) + math.abs(v.z)) > 0.1 then return end
+    local contents = deck.getObjects()
+    if not contents then return end
+    local guidJoker, guidBlack, guidRed = nil, nil, nil
+    local topJoker, topBlack, topRed = false, false, false
+    local wildCount, cardType, inconsistent = 0, nil, false
+    for k, oneCard in ipairs(contents) do
+      local _, shortName, shortSuit = cardDeets(oneCard)
+      local isTop = (k == qty)
+      if shortName == "2" or shortName == "Joker" then
+        wildCount = wildCount + 1
+        if shortName == "Joker" then guidJoker = oneCard.guid; if isTop then topJoker = true end end
+      else
+        if shortSuit == "Clubs" or shortSuit == "Spades" then
+          guidBlack = oneCard.guid; if isTop then topBlack = true end
+        else
+          guidRed = oneCard.guid; if isTop then topRed = true end
+        end
+        if not cardType then cardType = shortName
+        elseif cardType ~= shortName then inconsistent = true end
+      end
+    end
+    if inconsistent then return end   -- mixed deck, not a single-rank book (e.g. main/discard)
+    local deckPos, deckScale = deck.getPosition(), deck.getScale()
+    local function bubble(guid)
+      if guid then
+        deck.takeObject({position = {deckPos.x, deckPos.y + deckScale.y/2 + 0.05, deckPos.z}, guid = guid})
+      end
+    end
+    if giRuleSet == giCaliforniaRules and wildCount == qty then
+      if not topJoker and guidJoker then bubble(guidJoker) end   -- wild book → joker on top
+    elseif wildCount > 0 then
+      if not topBlack then bubble(guidBlack) end                  -- black book → black on top
+    else
+      if not topRed then bubble(guidRed) end                      -- red book → red on top
+    end
+  end)
 end
 
 function scoreTarget(target)
@@ -6310,33 +6384,19 @@ function scoreTarget(target)
           bProblem = true
         end
         if (not bProblem) then
+          -- The top-card "bubble" used to happen HERE, but scoreTarget runs on every scoring/
+          -- meld scan (including mid-move), so the takeObject flung cards off moving decks.
+          -- It now lives in restackBookTop(), called only on a STATIONARY book (on card-add and
+          -- after the move).  scoreTarget just classifies/scores now — no mutation.
           if ( (giRuleSet==giCaliforniaRules) and (iWildCount==iQty) ) then
             sDesc = sDesc .. "\n" .. "Wild Book"
             bookScore=gi_WILD_BOOK_SCORE
-            --score=1500
-            if (not bTopIsJoker) and (guidGotJoker) then
-                local deckPos = target.getPosition()
-                local deckScale = target.getScale()
-                local oneGot = target.takeObject{position={deckPos.x, deckPos.y+deckScale.y/2+0.05, deckPos.z},guid=guidGotJoker}
-            end
           elseif (iWildCount>0) then
             sDesc = sDesc .. "\n" .. "Black Book"
             bookScore=gi_BLACK_BOOK_SCORE
-            --score=300
-            if (not bTopIsBlack) then
-                local deckPos = target.getPosition()
-                local deckScale = target.getScale()
-                local oneGot = target.takeObject{position={deckPos.x, deckPos.y+deckScale.y/2+0.05, deckPos.z},guid=guidGotBlack}
-            end
           else
             sDesc = sDesc .. "\n" .. "Red Book"
             bookScore=gi_RED_BOOK_SCORE
-            --score=500
-            if (not bTopIsRed) then
-              local deckPos = target.getPosition()
-              local deckScale = target.getScale()
-              local oneGot = target.takeObject{position={deckPos.x, deckPos.y+deckScale.y/2+0.05, deckPos.z},guid=guidGotRed}
-            end
           end
         end
       end

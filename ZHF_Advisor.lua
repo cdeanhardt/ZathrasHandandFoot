@@ -2436,6 +2436,26 @@ function executeTurnPlan(plan)
     return ENHANCE_PAUSE_MIN + math.random() * (ENHANCE_PAUSE_MAX - ENHANCE_PAUSE_MIN)
   end
 
+  -- Drop any object outside this meld's own column (lateral offset > ~1.5 from anchorPos) so a
+  -- proximity/rank scan can't sweep cards — rank OR wild — out of an ADJACENT meld column into
+  -- the book being formed.  Position-based, so it filters stray 9s and stray wilds alike; an
+  -- in-column wild (legitimately part of this meld) sits at ~0 offset and is kept.
+  local function filterToColumn(objs, anchorPos)
+    if not anchorPos then return objs end
+    local decode  = getPlayerDecodeDir(sColor)
+    local latAxis = (decode and decode[1]) or "x"
+    local out = {}
+    for _, obj in ipairs(objs) do
+      local keep = false
+      pcall(function()
+        local p = obj.getPosition()
+        if p and math.abs(p[latAxis] - anchorPos[latAxis]) <= 1.5 then keep = true end
+      end)
+      if keep then table.insert(out, obj) end
+    end
+    return out
+  end
+
   -- When a collection of meld objects totals 7+ cards, stack them so TTS merges
   -- them into a single Deck and checkAndMoveBooks can find and rotate it.
   -- For < 7 cards, fall through to spread4 as before.
@@ -2516,6 +2536,7 @@ function executeTurnPlan(plan)
                   table.insert(safe, obj)
                 end
               end
+              safe = filterToColumn(safe, capturedPos)
               if #safe > 0 then
                 local anchorPos
                 pcall(function() anchorPos = safe[1].getPosition() end)
@@ -2598,6 +2619,7 @@ function executeTurnPlan(plan)
                   end
                 end
               end
+              safe = filterToColumn(safe, capturedPos)
               if #safe > 0 then stackOrSpread(safe, capturedPos) end
             end)
             -- Unconditional book checks: if cards merged before the scan ran,
@@ -2645,6 +2667,7 @@ function executeTurnPlan(plan)
               for _, obj in ipairs(nearby) do
                 if pcall(function() obj.getPosition() end) then table.insert(safe, obj) end
               end
+              safe = filterToColumn(safe, capturedPos)
               if #safe > 0 then stackOrSpread(safe, capturedPos) end
             end)
           end, dt + 1.0)
@@ -2742,6 +2765,7 @@ function executeTurnPlan(plan)
                 end
                 safe = filtered
               end
+              safe = filterToColumn(safe, capturedPos)
               if #safe > 0 then stackOrSpread(safe, capturedPos) end
             end)
             -- Unconditional book check: getTableCardsOfRank skips all-wild Decks (no

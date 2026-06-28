@@ -241,7 +241,20 @@ function updateDiscardButton(sColor)
   end)
 end
 
+-- Pressing Draw or Plan means the player is still in this hand, so undo the hand-end state set
+-- by a "gone out" detection — including a FALSE ending where play actually continues.  Clears
+-- gbAutoSuppress (the persistent suppressor) AND the transient flags, so autodraw/autoexec can
+-- resume immediately instead of waiting up to 10s for those to time out.  Auto stays on until
+-- the hand genuinely ends again.
+function resumeAutoPlay()
+  gbAutoSuppress = false
+  gbHandOver     = false
+  gbFinishFlag   = false
+  gbHandWonPause = false
+end
+
 function click_ActionDraw(player)
+  resumeAutoPlay()
   local sColor = player.color
   if not mainDeck then return end
 
@@ -383,7 +396,7 @@ local function startAutoExecTimer(minSec, maxSec)
     -- at scoring ~3s, gbHandWonPause at 5s, gbFinishFlag at 10s), so a plan that was mid
     -- countdown when an opponent went out is never auto-executed.  Manual Execute is
     -- unaffected — this gates only the automatic path.
-    if gbHandWonPause or gbFinishFlag or gbHandOver then
+    if gbHandWonPause or gbFinishFlag or gbHandOver or gbAutoSuppress then
       gAutoExecWaitId = nil
       UI.setAttribute("progressBarFill", "width", "0")
       return
@@ -652,7 +665,7 @@ function showPlanPanel(plan)
       updatePlanNavButtons()
       -- Don't even start the auto-exec countdown if the hand is already over (an
       -- opponent went out).  Same guard the tick uses; belt-and-suspenders.
-      if gAutoExecEnabled and not gbHandWonPause and not gbFinishFlag and not gbHandOver then
+      if gAutoExecEnabled and not gbHandWonPause and not gbFinishFlag and not gbHandOver and not gbAutoSuppress then
         local state       = capturedPlan and capturedPlan.state
         local noMelds     = not state or #state.melds == 0
         local hasFoot     = state and state.hasFoot
@@ -687,6 +700,7 @@ function click_FixPlanPanel(player)
 end
 
 function click_ActionPlan(player)
+  resumeAutoPlay()
   local sColor = player.color
   if UI.getAttribute("PlanResultPanel", "active") == "true" then
     local capturedPlan = gPlanResult

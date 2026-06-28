@@ -13,6 +13,65 @@ function, and intent so the change can be located and verified against current c
 
 ---
 
+## v39 — 2026-06-27
+**Book lift changed from a (wrong) multiplier to a fixed ~2-inch clearance.** v38 used
+`raisedY = p.y * 3`, which is 3× the absolute world Y (table base included), not 3× the height
+off the table — a large, position-dependent lift. Replaced with `raisedY = p.y + 2.0` in
+`executeMoveBooks` (`Global.-1.lua`): a fixed 2.0-board-unit lift above the deck's resting
+height. Per this game's card constant (gv_CARD_SIZE x=3/z=2 ≈ a 3.5"×2.5" card), 1 board unit
+≈ ~1.2", so 2.0 units ≈ ~2.4" — the "≈2 inches to clear easily" requested. Tunable.
+
+## v38 — 2026-06-27
+**Books now travel HIGH over the table when moving to the score zone.** `executeMoveBooks`
+(`Global.-1.lua`) used to slide a book flat across the table to its slot, dragging it past
+neighbouring melds (mixing cards). It now does a 3-phase arc: lift straight up to ~3x the
+book's height off the board (`raisedY = p.y * 3`, tunable), carry it across at that height to
+above the slot, then lower it straight down. Phases spaced (1.0s, 2.0s) so each setPositionSmooth
+finishes before the next; rotation waits until after the drop (delay+3.7); per-book cadence
+1.6→2.7s; finalDelay adjusted.
+
+## v37 — 2026-06-24
+**Booking a meld no longer steals cards (rank OR wild) from the adjacent meld.** The wild/meld
+stacking branches in `executeTurnPlan` (`ZHF_Advisor.lua`) fed `stackOrSpread` a `safe` list
+built partly from `getCardsNearPos(..., 3.0)` (and `getMeldColumnObjects`'s ±2.0 wild absorption)
+with no column filter — so a 3-unit radius reached into the neighbouring column and swept its 9s
+(and stray wilds) into the book, making an invalid mixed book. Only the wild-only branch had the
+v15 lateral filter; the partial-play, naturals-already-placed, and new-wild-meld branches did not.
+Added a shared `filterToColumn(objs, anchorPos)` helper (keep only cards within 1.5 lateral units
+of the deposit column — positional, so it drops stray 9s and stray wilds alike, keeps in-column
+wilds) and applied it to the final `safe` in all four branches before stacking.
+
+## v36 — 2026-06-24
+**Manual Draw/Plan resumes auto-play (false-ending recovery).** New `resumeAutoPlay()`
+(`ZHF_UI.lua`) clears `gbAutoSuppress` plus the transient hand-end flags
+(`gbHandOver`/`gbFinishFlag`/`gbHandWonPause`), called at the top of `click_ActionDraw` and
+`click_ActionPlan`. So if a "gone out" detection was a FALSE ending and play continues, pressing
+Draw or Plan re-enables autodraw/autoexec immediately (not after the flags time out). Auto stays
+on until the hand genuinely ends again (which re-sets gbAutoSuppress via the go-out handler).
+
+## v35 — 2026-06-24
+**Suppress autodraw/autoexec for the rest of an ended hand.** The existing gates used
+`gbHandOver`, which resets at scoring (~3s after go-out), so a turn-start in the window before
+the next deal could re-trigger auto. Added a dedicated `gbAutoSuppress` flag: set true on go-out,
+cleared only in `initializeHand` (the new deal). Added `not gbAutoSuppress` to all three gates —
+autodraw (`onPlayerTurnStart`), the autoexec countdown tick, and the autoexec kickoff
+(`ZHF_UI.lua`). Net: once the hand ends, no autodraw/autoexec until the next hand, at which point
+it resumes on the player's turn as usual (if the boxes are checked).
+
+## v34 — 2026-06-22
+**Top-card re-stack moved out of `scoreTarget` (it was flinging cards off moving books).** The
+"bubble the right-coloured card to the top" logic was a side effect of `scoreTarget`, which runs
+on every scoring/meld scan — including the one `executeMoveBooks` triggers while books are still
+sliding — so `takeObject` ejected the top card off a moving deck.
+- New `restackBookTop(deck)` (`Global.-1.lua`): same red/black/joker-on-top rule, but with a
+  MOTION GUARD (skips if the deck has velocity) and valid-book checks (qty 7–20, single rank),
+  so it only ever runs on a stationary book.
+- `scoreTarget` now just classifies/scores — no mutation.
+- Triggered on card-add via `onObjectEnterContainer` (`ZHF_Events.lua`, re-enabled but never
+  touches the entering card — only the bag's guid, deferred + retried until the deck is parked,
+  debounced per deck), and after each book settles in `executeMoveBooks`.
+Keeps today's behavior (re-stacks when auto-play or a player adds a card) without the mid-move drop.
+
 ## v33 — 2026-06-21
 **Books shed/drop a card while moving to the score zone — two fixes** (`executeMoveBooks`,
 `Global.-1.lua`):

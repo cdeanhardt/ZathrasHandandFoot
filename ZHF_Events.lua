@@ -289,15 +289,39 @@ function onObjectLeaveContainer(bag, obj)
   end
 end
 
+gRestackPending = gRestackPending or {}
 function onObjectEnterContainer(bag, obj)
-  -- Intentionally a no-op.  When cards collapse into a book Deck (e.g. auto-exec
-  -- forming a wild book), TTS invalidates the entering Card object's reference AS
-  -- this event fires.  Calling obj.getGUID()/obj.getDescription() on it throws a
-  -- C# "Object reference not set to an instance of an object" error that ESCAPES
-  -- pcall (same hazard documented in executeTurnPlan — you cannot guard it, you can
-  -- only avoid touching the merging reference).  The values previously computed here
-  -- were never used (their only consumer, enteredAndWaited, is a no-op), so we simply
-  -- do not access obj at all.
+  -- A card was added to a container (by auto-play OR a player dropping it).  If the container
+  -- is a book Deck, re-stack its top card to show the right colour.  CRITICAL: do NOT touch the
+  -- entering `obj` — it's mid-merge and TTS invalidates its reference, throwing a C# "Object
+  -- reference not set" that escapes pcall (the reason this handler used to be a no-op).  We only
+  -- capture the BAG's guid and act on the re-fetched deck later, once it's stationary.  The
+  -- restack is deferred (settle) and retried while the deck is still moving, and debounced per
+  -- deck so a 7-card formation doesn't schedule 7 restacks.
+  if gbInitializing or gbDealing then return end
+  local guid
+  local ok = pcall(function() if bag and bag.tag == "Deck" then guid = bag.getGUID() end end)
+  if not ok or not guid then return end
+  if gRestackPending[guid] then return end
+  gRestackPending[guid] = true
+  local tries = 0
+  local function attempt()
+    tries = tries + 1
+    local deck = getObjectFromGUID(guid)
+    if not deck then gRestackPending[guid] = nil; return end
+    local moving = false
+    pcall(function()
+      local v = deck.getVelocity()
+      if v and (math.abs(v.x) + math.abs(v.y) + math.abs(v.z)) > 0.1 then moving = true end
+    end)
+    if moving and tries < 8 then
+      Wait.time(attempt, 0.5)   -- still sliding to its slot — retry once parked
+      return
+    end
+    gRestackPending[guid] = nil
+    pcall(function() restackBookTop(deck) end)
+  end
+  Wait.time(attempt, 0.6)   -- let the just-added card settle before re-stacking
 end
 
 function objectInZone(obj, zone)
