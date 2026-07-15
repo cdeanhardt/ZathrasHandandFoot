@@ -228,7 +228,7 @@
                 active="false"
                 onClick="click_ActionDiscard" />
         <!-- Build stamp. Bumped by Claude on each requested change. -->
-        <Text id="ActionVersionStamp" text="v39"
+        <Text id="ActionVersionStamp" text="v57"
               width="180" height="16"
               rectAlignment="LowerCenter" offsetXY="0 3"
               fontSize="12" color="#444444" alignment="MiddleCenter" />
@@ -243,6 +243,7 @@
        width="420" height="30"
        rectAlignment="MiddleCenter"
        returnToOriginalPositionWhenReleased="false" allowDragging="true"
+       onMouseDown="planPanelDown" onMouseUp="planPanelUp"
        color="#bbbbbb00"
        visibility="White">
     <Row id="PlanResultMenuBar" class="MenuBar" width="420">

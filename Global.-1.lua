@@ -23,7 +23,7 @@ gbAutoSuppress  = false  -- true from go-out until the NEXT deal: suppresses aut
                          -- too early for this — see ZHF_Scoring.recordScores.)
 gsSavedDate     = ""    -- date string at last save; used to detect a new day on reload
 gCompletedGames = {}    -- snapshots of games completed today; persisted via onSave/onLoad
-gsVersion       = "v39"  -- code version; onLoad pushes this to the ActionVersionStamp UI text.
+gsVersion       = "v57"  -- code version; onLoad pushes this to the ActionVersionStamp UI text.
                          -- BUMP THIS (the Lua constant) per code-change request — it's the
                          -- source of truth.  The static text in Global.-1.xml is just a fallback
                          -- shown before onLoad runs.  Lua-set so a hot-reload (Ctrl+Alt+S) always
@@ -423,6 +423,10 @@ function dealDeck(oMainDeck)
           Wait.time(function()
             pcall(function()
               local pos = card.getPosition()
+              -- Booking keep-out anchor: remember where the foot actually landed so
+              -- planMoveBooks never routes a finished book on top of it (TTS fuses on
+              -- contact regardless of rank).  Nominal footPos is the load-time fallback.
+              playerStuff[captColor].footPosWorld = {x=pos.x, y=pos.y, z=pos.z}
               local decode = gt_DECODE_DIR[gt_COLOR_ROT[captColor] or 0]
               if decode then
                 local dir = decode[2]
@@ -628,6 +632,7 @@ function onSave()
     ruleSet        = giRuleSet,
     savedDate      = gsSavedDate,
     completedGames = gCompletedGames,
+    version        = gsVersion,   -- build stamp; a mismatch on load means a new codebase was deployed
   }
   -- Save per-player preferences so they survive a script reload mid-game.
   if playerStuff then
@@ -667,6 +672,7 @@ function onLoad(saved_data)
   -- Locals to carry restored values past the constant-definition section below.
   local loadedRuleSet    = nil
   local loadedPlayerPrefs = nil
+  local freshDeploy       = false   -- set true when a new codebase (version) is detected on load
 
   -- Load persisted data.
   if saved_data and saved_data ~= "" then
@@ -683,6 +689,17 @@ function onLoad(saved_data)
     loadedPlayerPrefs   = loaded_data.playerPrefs
     gsSavedDate         = loaded_data.savedDate or ""
     gCompletedGames     = loaded_data.completedGames or {}
+    -- NEW-DEPLOY RESET: the save was written by the previously-running build, so a stored
+    -- version that differs from this code's gsVersion means a new codebase was just published.
+    -- Start clean — zero the scoresheet and set hand 0 so the next deal is hand 1.  Game history
+    -- (completedGames / "Previous Games") is preserved.
+    if loaded_data.version ~= gsVersion then
+      freshDeploy = true
+      giHand = 0
+      pcall(ClearScores)
+      log("New codebase deployed (" .. tostring(loaded_data.version) .. " -> " ..
+          tostring(gsVersion) .. "): scores zeroed, hand reset to 0.")
+    end
   end
 
   for _, oThing in pairs(self.getObjects()) do
@@ -1361,10 +1378,11 @@ end, true)
   -- then refreshScoresheet() restores scores and hand number if mid-game.
   Wait.time(function ()
     setPlayers()
-    if giHand and giHand > 0 then
+    -- Refresh when resuming a mid-game hand OR after a new-deploy reset (to paint the zeroed sheet).
+    if (giHand and giHand > 0) or freshDeploy then
       refreshScoresheet()
     end
-    pcall(checkDateOnLoad)
+    pcall(checkDateOnLoad)   -- also re-writes the daily log, dropping the now-zeroed in-progress game
   end, 1)
 
   -- autodeal
@@ -3397,13 +3415,155 @@ function traceClear()
     Notes.editNotebookTab({index=idx, title="Debug Trace", body="", color="Grey"})
   end)
 end
+gTraceFlushPending = gTraceFlushPending or false
+function traceFlush()
+  gTraceFlushPending = false
+  pcall(function()
+    local idx = findOrCreateNotebookTab("Debug Trace", "Grey")
+    Notes.editNotebookTab({index=idx, title="Debug Trace", body=table.concat(gTraceLines, "\n"), color="Grey"})
+  end)
+end
 function trace(msg)
   if not gbTraceOn then return end
   table.insert(gTraceLines, tostring(msg))
   while #gTraceLines > 600 do table.remove(gTraceLines, 1) end
+  -- Debounce the notebook write: coalesce a burst of trace() calls into ONE editNotebookTab
+  -- ~0.4s later.  Previously every line did a getNotebookTabs() + full-buffer rewrite, flooding
+  -- the TTS Notes API and starving the once-per-hand Scores write (recordScores/updateDailyLog),
+  -- so end-of-hand scores stopped recording.  Batching keeps the trace current without the flood.
+  if not gTraceFlushPending then
+    gTraceFlushPending = true
+    Wait.time(traceFlush, 0.4)
+  end
+end
+
+-- ORPHAN DIAGNOSTIC (TEMP) -----------------------------------------------------
+-- Logs any loose individual Card in a play zone that the meld scans would SKIP,
+-- i.e. the exact "physically there but not a real card" state: face-down,
+-- locked, or an unparseable description.  Deduped by GUID+phase so each orphan
+-- logs once per checkpoint; comparing which phase FIRST reports a given GUID
+-- pins the operation that orphaned it (e.g. seen at post-move but not pre-move
+-- => the book move flipped/locked it).  Remove once the cause is found.
+gSeenOrphans = gSeenOrphans or {}
+-- GUIDs of books currently being carried to a slot; planMoveBooks skips these so a
+-- book in flight is never re-scheduled by a concurrent checkAndMoveBooks scan.
+gInTransit = gInTransit or {}
+function dumpOrphans(context)
+  if not gbTraceOn then return end
+  if not giPlayerCount or not objScoreZones[giPlayerCount] then return end
+  local colors = objScoreZones[giPlayerCount]["Colors"]
+  if not colors then return end
+  -- At book phases, log EVERY loose single left in the zone (a face-up valid straggler
+  -- that didn't fuse into the book is the most common orphan, and the bad-only filter
+  -- below misses it).  At other phases, log only clearly-broken cards to limit noise.
+  local logAll = (context == "post-move" or context == "post-book")
+  for sColor, _ in pairs(colors) do
+    local cz = getPlayerZones(sColor)
+    if cz and cz.zones then
+      for _, ze in ipairs(cz.zones) do
+        local ok, objs = pcall(function() return ze.obj.getObjects() end)
+        if ok and objs then
+          for _, obj in ipairs(objs) do
+            pcall(function()
+              -- Only LOOSE individual Cards matter; a Deck is a meld/book, not an orphan.
+              if obj.tag == "Card" then
+                local _, rk, st = cardDeets(obj)
+                local fd   = obj.is_face_down
+                local lk   = obj.getLock()
+                local badRank = (not rk) or rk == ""
+                local broken  = fd or lk or badRank
+                if broken or logAll then
+                  local g   = obj.getGUID()
+                  local key = tostring(g) .. "|" .. tostring(context)
+                  if not gSeenOrphans[key] then
+                    gSeenOrphans[key] = true
+                    local p   = obj.getPosition() or {x=0, y=0, z=0}
+                    local r   = obj.getRotation() or {x=0, y=0, z=0}
+                    local tag = broken and "ORPHAN" or "LOOSE"
+                    trace(string.format(
+                      "%s[%s] %s guid=%s fd=%s lock=%s rank='%s' suit='%s' rot=(%.0f,%.0f,%.0f) @%.1f,%.1f",
+                      tag, tostring(context), sColor, tostring(g), tostring(fd), tostring(lk),
+                      tostring(rk), tostring(st), r.x, r.y, r.z, p.x, p.z))
+                  end
+                end
+              end
+            end)
+          end
+        end
+      end
+    end
+  end
+end
+
+-- CARD CENSUS (TEMP) -----------------------------------------------------------
+-- Counts EVERY card in the whole game -- loose Cards plus the contents of every
+-- Deck/Bag (draw pile, discard, foots, hands, melds, books) -- and the per-rank
+-- totals.  In a normal game these are INVARIANT: draw/discard just move a card
+-- between counted places, nothing creates or destroys one.  So if a book formation
+-- makes the total (or a rank's count) go UP, TTS spawned a phantom during the merge
+-- -- proving the "orphan" was generated, not left behind.  Logs a DELTA vs the
+-- previous census so a spurious +1 is obvious.  Remove once resolved.
+gPrevCensus = gPrevCensus or nil
+function cardCensus(context)
+  if not gbTraceOn then return end
+  local counts, total = {}, 0
+  local function tally(c)
+    local rk = "?"
+    pcall(function() local _, r = cardDeets(c); rk = r or "?" end)
+    counts[rk] = (counts[rk] or 0) + 1
+    total = total + 1
+  end
   pcall(function()
-    local idx = findOrCreateNotebookTab("Debug Trace", "Grey")
-    Notes.editNotebookTab({index=idx, title="Debug Trace", body=table.concat(gTraceLines, "\n"), color="Grey"})
+    for _, obj in ipairs(getAllObjects()) do
+      pcall(function()
+        if obj.tag == "Card" then
+          tally(obj)
+        elseif obj.tag == "Deck" or obj.tag == "Bag" then
+          local sub = obj.getObjects()
+          if sub then for _, c in ipairs(sub) do tally(c) end end
+        end
+      end)
+    end
+  end)
+  local deltaStr = ""
+  if gPrevCensus then
+    local parts, allRanks = {}, {}
+    for r in pairs(counts) do allRanks[r] = true end
+    for r in pairs(gPrevCensus.counts) do allRanks[r] = true end
+    for r in pairs(allRanks) do
+      local a = gPrevCensus.counts[r] or 0
+      local b = counts[r] or 0
+      if a ~= b then table.insert(parts, string.format("%s %d->%d", tostring(r), a, b)) end
+    end
+    if total ~= gPrevCensus.total or #parts > 0 then
+      deltaStr = "  DELTA total " .. gPrevCensus.total .. "->" .. total ..
+                 (#parts > 0 and (" [" .. table.concat(parts, " ") .. "]") or "")
+    end
+  end
+  trace("CENSUS[" .. tostring(context) .. "] total=" .. total .. deltaStr)
+  gPrevCensus = {counts=counts, total=total}
+end
+
+-- PLAN LEDGER (TEMP) -----------------------------------------------------------
+-- Logs the INTENT of a turn plan before it executes: each natural meld play and
+-- each wild placement, with counts and kind.  Read alongside GATHER-BOOK (what
+-- the executor actually collected) and MOVE-BOOK (the finished book) to reconcile
+-- intended card count vs the count that ended up in the book -- an off-by-one
+-- points straight at a dropped/orphaned or doubled card.  Remove once diagnosed.
+function dumpPlan(plan)
+  if not gbTraceOn or not plan then return end
+  pcall(function()
+    for _, m in ipairs(plan.melds or {}) do
+      trace(string.format("PLAN meld rank=%s count=%s kind=%s",
+        tostring(m.rank), tostring(m.count), m.partial and "partial-onto-existing" or "full-layout"))
+    end
+    for _, wa in ipairs(plan.wildAllocs or {}) do
+      local kind = (wa.naturalsAlreadyPlaced and "wild-on-just-played")
+                or (wa.isNew and "wild-in-new-meld")
+                or "wild-on-existing-meld"
+      trace(string.format("PLAN wild rank=%s n=%s kind=%s",
+        tostring(wa.rank), tostring(#(wa.wilds or {})), kind))
+    end
   end)
 end
 
@@ -4889,6 +5049,21 @@ function executeLayoutRank(sColor, plan, bookByStacking)
         end
       end
       dph("auth count rank=" .. capturedRank .. " objs=" .. #authObjs .. " total=" .. authTotal)
+      -- TEMP diagnostic: log what the natural-book stacker gathered (rank/qty/pos of each obj).
+      -- Compare to MOVE-BOOK above: if the book ends up with ranks NOT listed here, they were
+      -- added by physics after the stack (TTS auto-merge on overlap), not by our scan.
+      pcall(function()
+        local parts = {}
+        for _, o in ipairs(authObjs) do
+          local rn, q, p = "?", 1, nil
+          pcall(function() local _, r = cardDeets(o); rn = r or "?" end)
+          pcall(function() q = o.getQuantity() end)
+          pcall(function() p = o.getPosition() end)
+          table.insert(parts, rn .. "(q" .. tostring(q) .. (p and (" @" .. string.format("%.1f,%.1f", p.x, p.z)) or "") .. ")")
+        end
+        trace("GATHER-BOOK " .. sColor .. " rank=" .. tostring(capturedRank) .. " total=" .. authTotal ..
+              " gathered: " .. table.concat(parts, " "))
+      end)
       if authTotal >= 7 then
         -- Pass 1: move everything to the anchor and merge via putObject.
         -- Sort largest-qty object first so it becomes the stable merge base.
@@ -5145,6 +5320,62 @@ function planMoveBooks(sColor)
     if geo[3].pos[lateralAxis] * direction >= 0 then rightIdx = 3 else leftIdx = 3 end
   end
 
+  -- Book resting Y and per-zone depth line (shared by all slots).  Computed up front so
+  -- slot selection can physics-verify each candidate's FULL 3D position before choosing it.
+  local refGeo = geo[rightIdx] or geo[leftIdx]
+  if not refGeo then return {ok=false} end
+  local targetY = refGeo.pos.y - refGeo.scl.y / 2 + gv_CARD_SIZE.y
+  local function slotDepth(zi)
+    local g = geo[zi]; if not g then return nil end
+    local dp    = g.pos[depthAxis]
+    local nudge = 0.4 * math.min(gv_CARD_SIZE.x, gv_CARD_SIZE.z)
+    return dp - nudge * (dp >= 0 and 1 or -1)
+  end
+  -- Foot keep-out: a finished book must never land on/near this player's foot, or TTS will
+  -- fuse the book INTO the foot on contact (the merge is positional, not by matching rank).
+  -- Prefer the world position captured at deal time; fall back to the nominal footPos (e.g.
+  -- after a load-from-save when the deal loop did not run this session).
+  local footKeepXZ = nil
+  do
+    local psf = playerStuff and playerStuff[sColor]
+    if psf then
+      if psf.footPosWorld then
+        footKeepXZ = {x=psf.footPosWorld.x, z=psf.footPosWorld.z}
+      elseif psf.footPos then
+        footKeepXZ = {x=psf.footPos[1], z=psf.footPos[3]}
+      end
+    end
+  end
+  -- A slot is usable only if it clears the foot on BOTH axes AND nothing (Card/Deck) is
+  -- already physically resting there.  The zone-occupancy (isBlocked) check is lateral-only
+  -- and blind to the foot, so this is what actually guarantees "no book ever combines".
+  local function slotUsable(zi, lat)
+    local dep = slotDepth(zi); if not dep then return false end
+    local tp = {x=0, y=targetY, z=0}
+    tp[lateralAxis] = lat
+    tp[depthAxis]   = dep
+    if footKeepXZ then
+      local keep = gv_CARD_SIZE.x   -- long side: generous both-axis keep-out radius
+      if math.abs(tp.x - footKeepXZ.x) < keep and math.abs(tp.z - footKeepXZ.z) < keep then
+        return false
+      end
+    end
+    local clear = true
+    pcall(function()
+      local hits = Physics.cast({
+        origin = {tp.x, tp.y + 1.5, tp.z}, direction = {0,-1,0}, type = 3,
+        size = {gv_CARD_SIZE.x * 0.9, 0.5, gv_CARD_SIZE.z * 0.9},
+        distance = 3.0,
+      })
+      for _, h in ipairs(hits or {}) do
+        local o = h.hit_object
+        local tg; pcall(function() tg = o and o.tag end)
+        if tg == "Card" or tg == "Deck" then clear = false; break end
+      end
+    end)
+    return clear
+  end
+
   local function getOccupied(zi)
     local occ = {}
     if not zi or not geo[zi] then return occ end
@@ -5187,7 +5418,7 @@ function planMoveBooks(sColor)
     for n = 1, 50 do
       local lat = slotLat(zi, n, rightFill)
       if not lat or not slotInBounds(zi, lat, rightFill) then return nil end
-      if not isBlocked(lat, occupied) then
+      if not isBlocked(lat, occupied) and slotUsable(zi, lat) then
         table.insert(occupied, lat)
         return lat
       end
@@ -5207,10 +5438,6 @@ function planMoveBooks(sColor)
     secondIdx, secondFill, secondOcc = rightIdx, true,  occRight
   end
 
-  local refGeo = geo[rightIdx] or geo[leftIdx]
-  if not refGeo then return {ok=false} end
-  local targetY = refGeo.pos.y - refGeo.scl.y / 2 + gv_CARD_SIZE.y
-
   local moves = {}
   local ok1, z1objs = pcall(function() return colorZones.zones[1].obj.getObjects() end)
   if not ok1 or not z1objs then return {ok=false} end
@@ -5223,6 +5450,40 @@ function planMoveBooks(sColor)
       if obj.tag == "Deck" then
         local ok_q, qty = pcall(function() return obj.getQuantity() end)
         if ok_q and qty and qty >= 7 then
+          -- GUARD: a book already being carried must not be re-scheduled.  This turn's many
+          -- meld/wild plays each call checkAndMoveBooks (twice), and while the book is still
+          -- physically leaving zone 1 every one of those scans re-finds it and launches ANOTHER
+          -- move — the competing move commands stall it mid-field at table level, where it rests
+          -- on and absorbs loose cards.  Skip any deck already flagged in transit.
+          local g; pcall(function() g = obj.getGUID() end)
+          if g and gInTransit[g] then return end
+          -- Classify the deck's contents.  A valid book has exactly ONE natural rank
+          -- (wilds — 2s/Jokers — don't count).  If two natural ranks are present, two
+          -- different melds physically fused; it is NOT a book and must not be moved or
+          -- scored as one.  Diagnostic MOVE-BOOK/INVALID-BOOK lines include the deck's
+          -- position so a collision can be located.
+          local ranks, natSet, nNat = {}, {}, 0
+          pcall(function()
+            for _, c in ipairs(obj.getObjects()) do
+              local _, rn = cardDeets(c)
+              ranks[rn or "?"] = (ranks[rn or "?"] or 0) + 1
+              if rn and rn ~= "2" and rn ~= "Joker" then
+                if not natSet[rn] then natSet[rn] = true; nNat = nNat + 1 end
+              end
+            end
+          end)
+          local parts = {}
+          for r, n in pairs(ranks) do table.insert(parts, r .. "x" .. n) end
+          local bpos; pcall(function() bpos = obj.getPosition() end)
+          local posStr = bpos and string.format(" @%.1f,%.1f", bpos.x, bpos.z) or ""
+          if nNat > 1 then
+            -- GUARD: two fused melds.  Log loudly and do NOT add to moves — shipping a
+            -- mixed pile as a book is worse than leaving it in place for manual repair.
+            trace("INVALID-BOOK " .. sColor .. " qty=" .. qty .. posStr ..
+                  " ranks: " .. table.concat(parts, " ") .. "  -- SKIPPED (mixed natural ranks)")
+            return
+          end
+          trace("MOVE-BOOK " .. sColor .. " qty=" .. qty .. posStr .. " ranks: " .. table.concat(parts, " "))
           local targetLat, slotZoneIdx
           targetLat = findSlot(firstIdx, firstFill, firstOcc)
           if targetLat then
@@ -5235,8 +5496,14 @@ function planMoveBooks(sColor)
             local zGeo = geo[slotZoneIdx]
             local tPos = {x=0, y=targetY, z=0}
             tPos[lateralAxis] = targetLat
-            tPos[depthAxis]   = zGeo.pos[depthAxis]  -- center of the destination zone
-            table.insert(moves, {book=obj, tPos=tPos})
+            -- Depth: zone centre, nudged ~40% of a card's short side toward the table's centre
+            -- line (toward 0 on the depth axis) so the books sit a touch further in.
+            local dp        = zGeo.pos[depthAxis]
+            tPos[depthAxis] = slotDepth(slotZoneIdx)
+            -- depthAxis/depthSign let executeMoveBooks shove a fouled drop AWAY from the table
+            -- centre (deeper into the zone's empty overflow) as a last-ditch anti-fuse measure.
+            table.insert(moves, {book=obj, tPos=tPos,
+                                 depthAxis=depthAxis, depthSign=(dp >= 0 and 1 or -1)})
           end
         end
       end
@@ -5249,12 +5516,13 @@ function planMoveBooks(sColor)
   local rotY = 0
   pcall(function() rotY = getPlayerRotY(sColor) end)
   local baseRotY = 90 * math.floor((rotY + 45) / 90)
-  return {ok=true, moves=moves, bookRotY=(baseRotY + 90) % 360}
+  return {ok=true, moves=moves, bookRotY=(baseRotY + 90) % 360, sColor=sColor}
 end
 
 --==============================================================================
 -- executeMoveBooks: animation layer for checkAndMoveBooks.
 function executeMoveBooks(plan)
+  dumpOrphans("pre-move")
   local bookRotY = plan.bookRotY or 90   -- 90° from face-up = landscape orientation
   -- #1 Solidify: before moving a book, fuse any loose card sitting on/beside it INTO the Deck
   -- via putObject, so a fragile physics-merge doesn't leave a straggler (or shed it onto
@@ -5285,14 +5553,34 @@ function executeMoveBooks(plan)
   for _, move in ipairs(plan.moves) do
     local captured    = move.book
     local tPos        = move.tPos
+    local finalPos    = tPos   -- where the book actually lands (updated if the drop is shifted)
     local capturedRot = bookRotY
-    -- Lift the book well clear of the table (~3x higher off the board), carry it ACROSS at that
-    -- height to above its slot, then lower it straight in.  Travelling high keeps it from
-    -- dragging through neighbouring melds and mixing their cards in.  Three phases, spaced so
-    -- each setPositionSmooth finishes before the next (a later call would override an earlier
-    -- one).  Rotate only after it has dropped in and settled.
+    -- Flag this book in transit so concurrent checkAndMoveBooks scans skip it (see guard in
+    -- planMoveBooks).  Cleared after it has arrived and settled, below.
+    local moveGuid; pcall(function() moveGuid = captured.getGUID() end)
+    if moveGuid then gInTransit[moveGuid] = true end
+    -- TEMP: log where each book travels from/to, so a book dropped onto another meld
+    -- (fusing into an invalid pile) can be spotted by comparing dest to a neighbour's pos.
+    pcall(function()
+      local sp = captured.getPosition()
+      local rn = "?"
+      local objs = captured.getObjects()
+      if objs and objs[1] then local _, r = cardDeets(objs[1]); rn = r or "?" end
+      trace(string.format("MOVE-DEST %s rank~%s from(%.1f,%.1f) to(%.1f,%.1f)",
+        tostring(plan.sColor), tostring(rn), sp.x, sp.z, tPos.x, tPos.z))
+    end)
+    -- Lift the book clear of the table, glide it ACROSS at that height to above its slot, then
+    -- lower it straight in.  The primary defence against picking up loose cards mid-flight is the
+    -- in-transit guard above (which stops competing move commands from stalling the book at table
+    -- level in the middle of the field); travelling high is the secondary defence.  Three phases,
+    -- spaced so each setPositionSmooth finishes before the next.  Rotate only after it settles.
     Wait.time(function()
       captured = solidifyBook(captured)   -- #1: fuse any straggler in before lifting
+      -- Lock out player interaction for the whole glide: grabbing a card out of a deck that is
+      -- mid-setPositionSmooth splits it and can strand the remainder floating (kinematic, never
+      -- settles) — the "10 cards floating" orphan.  Re-enabled once the book has landed (and by
+      -- the settle-scan safety net below, so a book is never left permanently un-grabbable).
+      pcall(function() captured.interactable = false end)
       pcall(function()
         local p = captured.getPosition()
         local raisedY = p.y + 2.0   -- lift ~2.0 board units (≈2 inches; 1 unit ≈ 1.2") above the
@@ -5302,19 +5590,57 @@ function executeMoveBooks(plan)
           pcall(function() captured.setPositionSmooth({tPos.x, raisedY, tPos.z}, false, false) end)  -- 2: across, high
         end, 1.0)
         Wait.time(function()
-          pcall(function() captured.setPositionSmooth(tPos, false, false) end)     -- 3: down into the slot
+          pcall(function()
+            -- FINAL ANTI-FUSE GUARD: never lower a book onto occupied space.  planMoveBooks
+            -- physics-verified this slot was clear, but something (the foot, a straggler,
+            -- another book) can drift in during the ~2s glide.  Re-cast at the slot; if any
+            -- Card/Deck other than this book is there, shove the drop one card-length deeper
+            -- (away from the table centre, into the zone's empty overflow) so it CANNOT merge.
+            local dropPos = tPos
+            local fouled  = false
+            pcall(function()
+              local hits = Physics.cast({
+                origin = {tPos.x, tPos.y + 1.5, tPos.z}, direction = {0,-1,0}, type = 3,
+                size = {gv_CARD_SIZE.x * 0.9, 0.5, gv_CARD_SIZE.z * 0.9},
+                distance = 3.0,
+              })
+              for _, h in ipairs(hits or {}) do
+                local o = h.hit_object
+                local tg; pcall(function() tg = o and o.tag end)
+                if o ~= captured and (tg == "Card" or tg == "Deck") then fouled = true; break end
+              end
+            end)
+            if fouled then
+              local da    = move.depthAxis or "z"
+              local sign  = move.depthSign or 1
+              local shift = gv_CARD_SIZE.x + 0.5
+              dropPos = {x=tPos.x, y=tPos.y, z=tPos.z}
+              dropPos[da] = dropPos[da] + shift * sign
+              trace(string.format("BOOK-DROP-BLOCKED %s slot(%.1f,%.1f) fouled -> shifted to (%.1f,%.1f)",
+                tostring(plan.sColor), tPos.x, tPos.z, dropPos.x, dropPos.z))
+            end
+            finalPos = dropPos                                              -- remember for hard-settle
+            captured.setPositionSmooth(dropPos, false, false)               -- 3: down into the slot
+          end)
         end, 2.0)
       end)
     end, delay)
     Wait.time(function()
       pcall(function() captured.setRotationSmooth({0, capturedRot, 0}, false, false) end)
     end, delay + 3.7)
+    Wait.time(function()
+      -- Hard-settle: a plain setPosition overrides any interrupted/stuck smooth move so the book
+      -- always lands in its slot, then re-enable interaction now that it is committed.
+      pcall(function() captured.setPosition(finalPos) end)
+      pcall(function() captured.interactable = true end)
+    end, delay + 4.5)
     delay = delay + 2.7
   end
   -- After all books have arrived and rotated, refresh icons and score display.
   -- Last book: drop finishes ~delay+3.0, rotation at delay+3.7; add settle margin.
   local finalDelay = delay + 2.0
   local function refreshIconsAndScore()
+    dumpOrphans("post-move")
     -- Now that each book has parked in its slot, re-stack its top card (red/black/joker).
     -- Stationary by now, and restackBookTop has its own motion guard, so it's safe here.
     for _, move in ipairs(plan.moves) do
@@ -5338,6 +5664,22 @@ function executeMoveBooks(plan)
   -- without waiting for the next unrelated event to trigger setCardDecal.
   Wait.time(refreshIconsAndScore, finalDelay)
   Wait.time(refreshIconsAndScore, finalDelay + 2.5)
+  -- Final settled scan AFTER restackBookTop has run: any loose single still sitting in
+  -- the zone here is a straggler the book left behind (the orphan).  A different state
+  -- vs post-move (which runs before restack) would implicate restackBookTop.
+  Wait.time(function()
+    pcall(function() dumpOrphans("post-book") end)
+    pcall(function() cardCensus("post-book") end)
+    -- Books have arrived and settled in their slots (out of zone 1); release the in-transit
+    -- flags so a later, legitimately-new book of the same object can move.  (Safety net: even
+    -- if a move errored, this clears the flag so a book is never permanently un-moveable.)
+    for _, mv in ipairs(plan.moves) do
+      pcall(function() local g = mv.book.getGUID(); if g then gInTransit[g] = nil end end)
+      -- Safety net: guarantee interaction is restored even if a move errored, so a book is
+      -- never left permanently un-grabbable by the players.
+      pcall(function() if mv.book then mv.book.interactable = true end end)
+    end
+  end, finalDelay + 5.0)
 end
 
 --==============================================================================

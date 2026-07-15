@@ -32,6 +32,10 @@ function recordScores(iHand)
     debug(dump(gtScores),"panel")
     gbHandOver = false   -- scoring complete; allow dealing now
     pcall(updateDailyLog)
+    -- Belt-and-suspenders: re-write the log a few seconds later, after any end-of-hand booking
+    -- animation/diagnostics have settled, so a single dropped Notes write can't lose the hand's
+    -- score from the notebook.
+    Wait.time(function() pcall(updateDailyLog) end, 3.0)
 
 end
 

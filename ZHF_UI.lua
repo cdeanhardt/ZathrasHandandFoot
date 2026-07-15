@@ -614,16 +614,26 @@ end
 -- Default screen position for the plan panel (matches XML offsetXY).
 local PLAN_PANEL_DEFAULT_OFFSET = "280 -160"
 
-local function hidePlanPanel(onDone)
-  cancelAutoExecTimer()
-  -- Snap the panel back to its default position BEFORE deactivating.
-  -- TTS's drag component stores isDragging=true and a drag-offset vector as
-  -- instance variables that survive active=false/true cycles (OnDisable does NOT
-  -- reset them).  When the panel reactivates it wakes up still "dragging" and
-  -- routes all pointer events to itself — buttons are visible but unclickable.
-  -- Explicitly setting offsetXY forces TTS to recalculate the drag component's
-  -- internal state from the new anchor, effectively ending the drag gesture.
-  -- allowDragging=false and raycastTarget=false are belt-and-suspenders on top.
+-- Drag-hold state (set by planPanelDown/Up, wired via onMouseDown/onMouseUp in Global.-1.xml).
+-- ROOT-CAUSE FIX for the "panel becomes un-draggable" bug: deactivating (active=false) a panel
+-- while the user is physically dragging it strands Unity's captured pointer drag — the panel
+-- wakes up still "dragging" and eats all clicks.  We can't script a mouse-up, but the probe
+-- confirmed onMouseUp DOES fire at the end of a drag, so we DEFER any hide until the user
+-- releases.  gPlanPanelHeld is true between DOWN and UP; a hide requested while held is parked
+-- in gPendingHide and flushed on release.
+local gPlanPanelHeld = false
+local gPendingHide   = nil   -- {onDone=fn} while a hide waits for the drag to be released
+local gPendingHideAt = nil   -- os.clock() when the hide was first deferred (for the safety cap)
+local PLAN_HIDE_DEFER_CAP = 15   -- force the hide if still "held" this long (a real drag can be
+                                 -- 5s+; the cap only guards against a missed onMouseUp wedging
+                                 -- the panel open — must exceed any plausible drag).
+
+-- The actual deactivation.  Factored out so it can run immediately (not held) or later (on
+-- release / safety cap).
+local function performHidePlanPanel(onDone)
+  -- Snap back to default position and drop dragging/raycast before deactivating.  With the
+  -- defer above this is now belt-and-suspenders (the panel is never deactivated mid-drag), but
+  -- it keeps the reappear clean.
   UI.setAttribute("PlanResultPanel", "offsetXY", PLAN_PANEL_DEFAULT_OFFSET)
   UI.setAttribute("PlanResultPanel", "allowDragging", "false")
   UI.setAttribute("PlanResultPanel", "raycastTarget", "false")
@@ -632,6 +642,34 @@ local function hidePlanPanel(onDone)
     UI.setAttribute("progressBarFill", "width", "0")
     if onDone then onDone() end
   end, 0.15)
+end
+
+-- Run a hide that was deferred while the panel was held (called from planPanelUp / safety cap).
+local function flushPendingHide()
+  if not gPendingHide then return end
+  local cb = gPendingHide.onDone
+  gPendingHide   = nil
+  gPendingHideAt = nil
+  performHidePlanPanel(cb)
+end
+
+local function hidePlanPanel(onDone)
+  cancelAutoExecTimer()
+  if gPlanPanelHeld then
+    -- Defer: don't deactivate a panel the user is physically dragging.  Wait for onMouseUp.
+    gPendingHide   = { onDone = onDone }
+    gPendingHideAt = os.clock()
+    print("[PLAN] close deferred — panel is held; will hide on release")
+    -- Safety cap: if a release event is ever missed, force the hide so the panel can't wedge open.
+    Wait.time(function()
+      if gPendingHide and (os.clock() - (gPendingHideAt or 0)) >= PLAN_HIDE_DEFER_CAP then
+        gPlanPanelHeld = false
+        flushPendingHide()
+      end
+    end, PLAN_HIDE_DEFER_CAP + 0.1)
+    return
+  end
+  performHidePlanPanel(onDone)
 end
 
 local function showPlanPanelActive()
@@ -697,6 +735,22 @@ function click_FixPlanPanel(player)
       end, 0.05)
     end
   end)
+end
+
+-- Drag-hold tracking for PlanResultPanel (wired via onMouseDown/onMouseUp in Global.-1.xml).
+-- The probe (v56) confirmed both fire, and onMouseUp arrives at the end of a genuine drag.
+-- DOWN marks the panel as held so any hide is deferred; UP clears it and flushes a deferred hide
+-- (so an auto-exec that expired mid-drag runs the instant the user lets go).  btn=-1 is LMB.
+function planPanelDown(player, btn, id)
+  gPlanPanelHeld = true
+end
+
+function planPanelUp(player, btn, id)
+  gPlanPanelHeld = false
+  if gPendingHide then
+    print("[PLAN] released — running deferred close now")
+    flushPendingHide()
+  end
 end
 
 function click_ActionPlan(player)

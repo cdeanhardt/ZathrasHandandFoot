@@ -102,9 +102,18 @@ function snapshotState(sColor)
     if total >= 7 and rank ~= "3" then
       local wildCt = (entry.embeddedWilds or 0)
       pcall(function() wildCt = wildCt + countMeldWilds(entry.obj) end)
-      local bt = (wildCt == 0) and "red" or (wildCt <= 2 and "black" or "wild")
-      table.insert(books[bt], {rank=rank, obj=entry.obj, bookType=bt, pos=entry.pos})
-      meldsByRank[rank] = nil
+      -- House rule: a rank book (red or black) needs >=1 red-suit AND >=1 black-suit natural
+      -- card.  Only promote to a book when colour-balanced (or the pile is all-wild).  A 7+
+      -- same-colour meld is NOT a book yet — leave it in meldsByRank so the planner keeps it
+      -- visible and can complete it with an opposite-colour card.
+      local ec = entry.colors or {}
+      local isAllWild     = (wildCt >= total)
+      local colorBalanced = ec.hasRed and ec.hasBlack
+      if isAllWild or colorBalanced then
+        local bt = (wildCt == 0) and "red" or (wildCt <= 2 and "black" or "wild")
+        table.insert(books[bt], {rank=rank, obj=entry.obj, bookType=bt, pos=entry.pos})
+        meldsByRank[rank] = nil
+      end
     end
   end
 
@@ -338,13 +347,26 @@ function evalMeldsToPlay(state, anyOpponentNearGoOut)
           if priority <= 2 and existingCount > 0 and projected > 7 then
             playCount = 7 - existingCount
           end
+          -- House-rule cap: never grow an UNBALANCED meld to book size (7+).  A rank book needs
+          -- >=1 red-suit AND >=1 black-suit natural card, so a same-colour meld pushed to 7 is
+          -- stuck (can't book, and its cards can't be reclaimed from the table).  Hold it at 6
+          -- until an opposite-colour card of this rank is available (it becomes a discard
+          -- candidate meanwhile).  p1/p2 book-completions require projColorBalanced so they are
+          -- unaffected; existingCount<7 skips plays onto an already-complete book (p5).
+          if priority >= 3 and not projColorBalanced
+             and existingCount < 7 and (existingCount + playCount) >= 7 then
+            playCount = math.max(0, 6 - existingCount)
+          end
           local partial = (playCount < count)
-          table.insert(plans, {
-            rank=rank, cards=cards, count=playCount,
-            existingCount=existingCount, priority=priority,
-            meldColor=meldColor, reason=reason,
-            partial=partial,
-          })
+          -- A capped-to-zero play contributes nothing; leave the cards in hand.
+          if playCount > 0 then
+            table.insert(plans, {
+              rank=rank, cards=cards, count=playCount,
+              existingCount=existingCount, priority=priority,
+              meldColor=meldColor, reason=reason,
+              partial=partial,
+            })
+          end
         end
       end
     end
@@ -1474,10 +1496,21 @@ function evalWildAllocations(state, meldPlan, logFn, projRed, suppressWildBook)
                         or canEmptyViaWildExtend or canEmptyViaWildOnMeld
         -- (note: `not hasFoot` deliberately excluded — post-foot rank-meld wilds require
         -- state.bookCounts.red>=2 gate below, so freePlace only lifts that gate in hand-emptying scenarios)
-        -- Rank melds require both suit-colors before a wild can form a valid black book.
-        -- Exempt when free-placing (hand-emptying foot-pickup): color correctness is secondary.
+        -- HARD RULE: a rank book must contain both a red-suit AND a black-suit natural.  A wild
+        -- may COMPLETE a rank meld into a book (reach 7) only if the meld already has both
+        -- colours — this is NOT waived for hand-emptying (freePlace).  Below 7 (not completing a
+        -- book), free-placing a leftover wild onto a single-colour meld is fine (stays open).
         local mc5 = m.colors or {hasRed=false, hasBlack=false}
-        local colorOk5   = m.isWildMeld or freePlace or (mc5.hasRed and mc5.hasBlack)
+        local hasBothColors5 = mc5.hasRed and mc5.hasBlack
+        local completesBook5 = (m.total + 1 >= 7)
+        local colorOk5
+        if m.isWildMeld then
+          colorOk5 = true
+        elseif completesBook5 then
+          colorOk5 = hasBothColors5              -- book completion always needs both colours
+        else
+          colorOk5 = freePlace or hasBothColors5 -- not completing a book: leftover wild OK
+        end
         local eligible   = wildMeldOk
                         and colorOk5
                         and postFootRankOk(m)
@@ -2428,6 +2461,9 @@ function executeTurnPlan(plan)
     trace("")
     trace("=== execute plan: " .. tostring(sColor) .. " melds=" .. #(plan.melds or {}) ..
           " wilds=" .. #(plan.wildAllocs or {}) .. " @t=" .. tostring(Time and Time.time or "?") .. " ===")
+    dumpPlan(plan)
+    dumpOrphans("pre-exec")
+    cardCensus("pre-exec")
   end)
 
   -- Returns a random inter-play pause when Enhance is enabled, else 0.

@@ -408,7 +408,21 @@ function onDiscardComplete(sColor, discardedObj)
     if (gb_USE_TURNS and sColor==Turns.turn_color) then
       Turns.turn_color=Turns.getNextTurnColor()
     end
-    announceAll(name .. " discarded ")
+    -- Report which card was discarded (single-card discards only).
+    local cardStr = ""
+    if discardedObj.tag == "Card" then
+      pcall(function()
+        local _, sName, sSuit = cardDeets(discardedObj)
+        if sName then
+          if sSuit and sSuit ~= "" and sName ~= "Joker" then
+            cardStr = " " .. sName .. " of " .. sSuit
+          else
+            cardStr = " " .. sName
+          end
+        end
+      end)
+    end
+    announceAll(name .. " discarded" .. cardStr)
     setCardDecal()
     checkFootNote(sColor)
     playDiscardSound()

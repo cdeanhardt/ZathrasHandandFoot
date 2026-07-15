@@ -13,6 +13,216 @@ function, and intent so the change can be located and verified against current c
 
 ---
 
+## v57 — 2026-07-15
+**FIX: Plan window no longer locks up when auto-exec closes it mid-drag.** Root cause: `hidePlanPanel`
+does `active=false` on `PlanResultPanel`; if the user is physically dragging the panel at that moment
+(auto-exec fires on a timer, blind to the drag), Unity's captured pointer-drag is stranded — the panel
+reappears still "dragging" and eats all clicks. The prior mitigations (offset reset, `raycastTarget=false`,
+the "Fix Panel" button) couldn't help because you can't script a mouse-up, and an `active` toggle doesn't
+clear TTS's retained drag state. The v56 probe confirmed `onMouseUp` DOES fire at the end of a genuine
+drag (tested a 5.3s drag), so the fix DEFERS the close until release:
+- `planPanelDown`/`planPanelUp` (`ZHF_UI.lua`, wired via `onMouseDown`/`onMouseUp` on `PlanResultPanel`)
+  set/clear `gPlanPanelHeld`.
+- `hidePlanPanel` parks the hide in `gPendingHide` when held instead of deactivating; `planPanelUp`
+  flushes it on release (so an auto-exec that expired mid-drag runs the instant you let go).
+- Safety cap `PLAN_HIDE_DEFER_CAP=15s` force-hides if an `onMouseUp` is ever missed (must exceed a real
+  drag, which can be 5s+, so it only guards the wedge-open failure mode).
+The v56 diagnostic `print()`s were replaced by this logic (two `[PLAN]` log lines remain to show the
+defer/flush in action; can be removed once confirmed in play).
+
+## v56 — 2026-07-15
+**TEMP DIAGNOSTIC: probe whether the Plan panel fires onMouseDown/onMouseUp.** Investigating the
+bug where dragging the Plan window while auto-exec closes it (SetActive(false) on the captured drag
+target) leaves the panel un-draggable. Added `onMouseDown="planPanelDown"`/`onMouseUp="planPanelUp"`
+to `PlanResultPanel` (`Global.-1.xml`) and two `print()` handlers (`ZHF_UI.lua`) that log DOWN/UP
+with a timestamp. Goal: confirm whether onMouseUp reliably fires at the END of a drag — if so, the
+auto-exec close can be deferred until release (a "held" flag); if UP is swallowed during drag, fall
+back to an always-active draggable wrapper. Remove this probe once the approach is chosen.
+
+## v55 — 2026-07-11
+**PLANNER: the bot no longer grows a meld to a stuck same-colour 7.** Follow-up to v54. v54 stopped
+a same-colour pile from being *scored/moved/counted* as a book, but the planner would still play
+cards to push an unbalanced meld to 7 (a meld that then can't book and whose cards can't be
+reclaimed from the table). `evalMeldsToPlay` (`ZHF_Advisor.lua`) now caps an UNBALANCED meld at 6
+cards: when a p3/p4 play would bring `existingCount + playCount` to ≥7 while `not projColorBalanced`,
+`playCount` is trimmed to `6 - existingCount` (held cards stay in hand and become discard
+candidates until an opposite-colour card of that rank appears). A play capped to zero is dropped
+rather than emitted. p1/p2 book-completions are unaffected (they only fire when `projColorBalanced`);
+`existingCount < 7` exempts p5 plays onto an already-complete book; wild ranks never reach here.
+
+## v54 — 2026-07-10
+**FIX: a same-colour pile (7 one-colour naturals, or 6 one-colour + a wild) could be treated as a
+completed book.** House rule: every rank book (red or black) must contain at least one black-suit
+AND one red-suit natural card of that rank; only wild books are exempt. Audit found the rule was
+already correctly enforced in end-of-hand scoring (`scoreTarget` "Incomplete Book (Need Red/Black)"),
+in `classifyBook`, in the planner's p1/p2 (`projColorBalanced`), and in wild allocation
+(`assignWild` `completesBook`). Three places did NOT enforce it and were closed:
+- **Auto-exec gather (`Global.-1.lua`, `bookByStacking` path):** before merging a 7+ column into a
+  book, it now scans the gathered naturals' colours; if all one colour it logs `HOLD-BOOK` and
+  falls through to the spread path, leaving the cards a visible/extendable open meld instead of
+  fusing them into a premature "book". Wild ranks exempt.
+- **`planMoveBooks` (`Global.-1.lua`):** the qty≥7 classifier now tracks natural-card colour; a
+  same-colour pile is logged `INVALID-BOOK ... (needs both colours)` and left in zone 1 rather than
+  moved to the booking area. (Safety net for any same-colour Deck formed by manual play.)
+- **`snapshotState` book-promotion (`ZHF_Advisor.lua`):** a spread meld of 7+ is now promoted to a
+  red/black book only when colour-balanced (all-wild piles still promote as wild); otherwise it
+  stays in `meldsByRank` so it is not counted toward `bookCounts`/go-out and remains extendable.
+Follow-up planner refinement is implemented in v55.
+
+## v53 — 2026-07-08
+**FIX: grabbing a card out of a book while it was auto-moving stranded the deck floating
+("orphaned") above the table.** Diagnosis from a Blue-player capture: CENSUS stayed `total=643`
+the entire time, so no card was duplicated/lost — the floating cards were real cards stuck in a
+bad kinematic state. Root cause: `executeMoveBooks` glides each book with `setPositionSmooth`
+over a ~4-second, three-phase high arc; a player grabbing a card mid-glide splits the `Deck`
+(which can invalidate the object reference), so the queued phase-3 `setPositionSmooth` no-ops
+inside its `pcall` and the remainder is left frozen at the raised glide height. (The slow, high
+glide — a v49 visual preference — widens this interruption window.) Fix in `Global.-1.lua`
+`executeMoveBooks`:
+- **Lock during move:** `captured.interactable = false` is set right after `solidifyBook`, for the
+  whole glide, so players cannot grab from a book that is in flight.
+- **Hard-settle on landing:** a new step at `delay+4.5` does a plain `setPosition(finalPos)` (a
+  teleport that overrides any stuck/interrupted smooth move so the book always lands in its slot)
+  and then restores `interactable = true`. `finalPos` tracks the actual drop (including the v52
+  fouled-slot shift).
+- **Safety net:** the final settle-scan loop (`finalDelay+5.0`) restores `interactable = true` on
+  every book even if a move errored, so a book is never left permanently un-grabbable.
+Note: the "10 cards" (from 8 wilds) also reflects the v52 proximity-fuse — the book had absorbed
+neighbours during the combine/glide before the grab froze it.
+
+## v52 — 2026-07-08
+**FIX (user-confirmed root cause): a finished book could be placed onto the player's foot and
+fuse into it.** TTS auto-merge is purely positional — two Card/Deck objects that come to rest
+overlapping fuse regardless of rank/suit (the matching "8 on top of the foot" was a coincidence,
+not the trigger). The hole: booking slot selection never knew the foot existed. `planMoveBooks`
+only avoided positions reported by the target zone's `getObjects()`, and only on the *lateral*
+axis, so a foot lying outside the zone bounds (or on the books' depth line) was invisible and a
+slot got computed right on top of it; the glide then lowered the book onto it → fuse. Three-layer
+fix, all in `Global.-1.lua`:
+- **Layer 1 (foot keep-out anchor):** the foot's real world position is now captured at deal time
+  (`playerStuff[color].footPosWorld`, in the foot-deal loop) alongside the existing red-3 capture.
+- **Layer 2 (slot verification):** `planMoveBooks` now rejects any candidate slot that (a) lands
+  within a card-length of the foot on BOTH axes (`footPosWorld`, or nominal `footPos` after a
+  load-from-save), or (b) is physically occupied — a `Physics.cast` at the slot's full 3D position
+  confirms it's clear (`slotUsable`) before the slot is chosen.
+- **Layer 3 (final anti-fuse guard):** `executeMoveBooks` re-casts at the slot immediately before
+  the lower-in; if anything (foot, straggler, another book) drifted in during the glide, it shoves
+  the drop one card-length deeper into the zone's empty overflow (`BOOK-DROP-BLOCKED` trace) so the
+  book can never merge. `depthAxis`/`depthSign` are carried on each move to aim that shift.
+This makes "separate books never combine, ever" a hard invariant rather than best-effort.
+
+## v51 — 2026-07-06
+**New-codebase deploy resets the scoreboard.** Requested: on publishing a new build, zero all
+scores and set hand 0 (next deal = hand 1). `onSave` now stores `version = gsVersion`; `onLoad`
+compares the restored `version` to the running `gsVersion` — a mismatch means a new codebase was
+just deployed (the save was written by the previous build), so it sets `giHand = 0`, calls
+`ClearScores()`, and refreshes the scoresheet (and daily log drops the now-empty in-progress game).
+Game history (`completedGames` / "Previous Games" tab) is preserved. NOTE: this fires on EVERY
+version bump, so deploying a build mid-game will reset that game's scores.
+
+## v50 — 2026-07-06
+**FIX: end-of-hand scores stopped recording to the notebook — our diagnostics were starving the
+Notes API.** `trace()` did a `getNotebookTabs()` + full-buffer `editNotebookTab` on EVERY line, and
+`dumpOrphans`/`cardCensus`/book logs fire dozens per turn; TTS throttles under that flood and
+silently drops writes, so the once-per-hand `recordScores`→`updateDailyLog` write (fired 3s after
+go-out, mid-flood) was lost. Two changes:
+- `Global.-1.lua` `trace()` now **debounces**: a burst of trace calls coalesces into ONE
+  `editNotebookTab` ~0.4s later (`traceFlush`/`gTraceFlushPending`), eliminating the flood.
+- `ZHF_Scoring.lua` `recordScores` re-writes the daily log once more 3s later as a safety net.
+Scoring logic itself was unchanged and correct; the dead `copyScores` (index-0 writer) is not used.
+
+## v49 — 2026-07-06
+**ROOT-CAUSE FIX: books are no longer scheduled to move more than once (in-transit guard).**
+Census (v48) proved no phantom is generated (`total=643` constant) — mega-books are real cards
+swept up. Trace showed a King book logged at the SAME mid-field spot (2.1,5.6) across two
+time-separated scans while its destination was (-11.4,2.2): it had **stalled** mid-field, not
+glided cleanly. Cause: a turn with 4 melds + a wild alloc calls `checkAndMoveBooks` many times,
+and each scan re-found the book still in zone 1 and launched ANOTHER move; the competing commands
+parked it at table level mid-field where it rested on and absorbed loose 9s/7s (→ 11-card invalid
+pile). Fix in `Global.-1.lua`: added `gInTransit` GUID set; `planMoveBooks` skips any book already
+flagged, `executeMoveBooks` flags each book when its move starts and clears it after arrival. The
+high smooth glide is kept (user preference) as a secondary defence. Diagnostics from v43–v48 remain
+to confirm the fix (expect no more `INVALID-BOOK`).
+
+## v48 — 2026-07-06
+**Card census — is the orphan generated, not left behind?** Question raised: maybe no 8th seven
+ever existed and TTS spawns a phantom during the merge. Added `cardCensus(context)`
+(`Global.-1.lua`, near `dumpOrphans`): counts every card in the whole game (loose Cards + contents
+of every Deck/Bag — draw/discard/foots/hands/melds/books) and per-rank totals, which are INVARIANT
+in a normal game. Logs `CENSUS[phase] total=N` with a `DELTA` line whenever the total or any rank
+count changes. Called at `pre-exec` and (settled) `post-book`. If a rank goes e.g. `7 8->9` across
+a booking, TTS generated a phantom — proof the orphan was created, not a real straggler.
+Diagnostic only. Remove once resolved.
+
+## v47 — 2026-07-06
+**Orphan detector now catches face-up stragglers + a settled post-book scan.** A 7-of-clubs
+orphaned during a 7-book with ZERO `ORPHAN` lines logged — because the old `dumpOrphans` only
+flagged face-down/locked/bad-description cards, and this orphan is a face-up, valid, loose single
+the book left behind. Changes in `Global.-1.lua`:
+- `dumpOrphans` now, at `post-move`/`post-book` phases, logs EVERY loose individual Card in the
+  zone as `LOOSE[...]` (broken ones still tagged `ORPHAN`), with rank+suit+fd+lock+rot+pos.
+- Added a `post-book` checkpoint 5s after the move (after `restackBookTop` + settle) so a
+  late-forming straggler is captured same-turn; differing state vs `post-move` implicates restack.
+Diagnostic only. Remove once the straggler cause is found.
+
+## v46 — 2026-07-05
+**Invalid-book guard + move-destination logging.** Trace caught a valid 7-card 4-book physically
+fusing with a 3-card 10-meld into a `qty=10` pile that `planMoveBooks` would have shipped as a
+book. Two changes in `Global.-1.lua`:
+- `planMoveBooks` now classifies each `qty≥7` deck by its **natural ranks** (wilds excluded). If
+  two natural ranks are present it's two fused melds, not a book: logs `INVALID-BOOK … SKIPPED
+  (mixed natural ranks)` and does **not** move/score it. Valid single-rank books log `MOVE-BOOK`
+  as before, now with the deck's `@x,z` position.
+- `executeMoveBooks` logs `MOVE-DEST rank~R from(x,z) to(x,z)` per book so a book dropped onto a
+  neighbouring meld can be located by comparing its destination to nearby anchors. (Added `sColor`
+  to the plan table for the label.)
+Guard is a real behaviour change (won't ship mixed piles); the logging is diagnostic. Remove logs
+once the collision cause is found.
+
+## v45 — 2026-07-05
+**Plan-ledger diagnostic.** Added `dumpPlan(plan)` (`Global.-1.lua`, near `dumpOrphans`), called at
+the start of `executeTurnPlan` (`ZHF_Advisor.lua`). Logs the turn's INTENT before it runs — each
+natural meld play (`PLAN meld rank=.. count=.. kind=full-layout|partial-onto-existing`) and each
+wild placement (`PLAN wild rank=.. n=.. kind=..`). Read alongside `GATHER-BOOK` (what the executor
+collected) and `MOVE-BOOK` (the finished book) to reconcile intended vs actual card count; an
+off-by-one pinpoints a dropped/orphaned or doubled card. Diagnostic only. Remove once diagnosed.
+
+## v44 — 2026-07-05
+**Orphan-card diagnostic.** Added `dumpOrphans(context)` (`Global.-1.lua`, near `trace`): scans
+every play zone for a loose individual Card the meld scans would SKIP — `is_face_down`, locked,
+or an unparseable description (that's the exact "there but not a real card" state). Logs GUID,
+face-down/lock flags, parsed rank, description, rotation and position to the Debug Trace, deduped
+by GUID+phase. Bracketed at three checkpoints: `pre-exec` (start of `executeTurnPlan`),
+`pre-move` and `post-move` (around `executeMoveBooks`). Whichever phase FIRST reports a given
+GUID pins the operation that orphaned it. Diagnostic only — no behaviour change. Remove once found.
+
+## v43 — 2026-07-05
+**TEMP diagnostic for foreign cards in books** (Aces getting into a 9s book during auto-exec).
+Added two trace lines to the Debug Trace notecard (`Global.-1.lua`): `GATHER-BOOK` (what the
+natural-rank stacker `bookByStacking` actually collected — rank/qty/pos of each) and `MOVE-BOOK`
+(the rank composition of every book right before `planMoveBooks` moves it). If a book's MOVE-BOOK
+ranks include cards not in its GATHER-BOOK list, they were added AFTER the stack — i.e. TTS
+physics auto-merge on overlap, not our scan. Remove both once diagnosed.
+
+## v42 — 2026-07-03
+**Books placed a touch closer to the table centre.** In `planMoveBooks` (`Global.-1.lua`) the
+book's depth position was the destination-zone centre; now nudged ~40% of a card's short side
+(`0.4 * min(gv_CARD_SIZE.x, gv_CARD_SIZE.z)` = 0.8 units) toward 0 on the depth axis (the table's
+centre line), for every player orientation.
+
+## v41 — 2026-07-02
+**Discard chat report now names the card.** `onDiscardComplete` (`ZHF_Events.lua`) announced
+"<name> discarded"; now appends the card, e.g. "<name> discarded King of Clubs" (Jokers just
+say "Joker"). Single-card discards only (a deck discard omits the name).
+
+## v40 — 2026-07-02
+**No more single-colour black books.** A book must contain both a red-suit and a black-suit
+natural. Phase 5 of `evalWildAllocations` (`ZHF_Advisor.lua`) had a `freePlace` (hand-emptying/
+go-out) exemption that let a wild COMPLETE a 6-card single-colour meld into an invalid 7-card
+"black book". Fixed: the color requirement is no longer waived when the wild completes a book
+(`completesBook5` → must have both colours); below 7, free-placing a leftover wild on an open
+single-colour meld is still allowed. Phases 2/3 already required both colours with no exemption.
+
 ## v39 — 2026-06-27
 **Book lift changed from a (wrong) multiplier to a fixed ~2-inch clearance.** v38 used
 `raisedY = p.y * 3`, which is 3× the absolute world Y (table base included), not 3× the height
